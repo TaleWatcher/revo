@@ -1,38 +1,28 @@
-const std = @import("std");
-const revo = @import("../root.zig");
-const root = @import("root.zig");
-const api = @import("api.zig");
-
-const Data = revo.Data;
-const VM = revo.VM;
-const HostResult = root.HostResult;
-
-const json = std.json;
-
 pub const impls: []const api.Impl = &.{
-    .{ .name = "encode", .f = root.define(&.{.any}, encode) },
-    .{ .name = "decode", .f = root.define(&.{.string}, decode) },
+    .{ .name = "encode", .f = root.def(&.{.any}, struct {
+        pub fn f(args: root.ArgsTuple(&.{.any}), vm: *VM) !HostResult {
+            var out = std.Io.Writer.Allocating.init(vm.runtime.alloc);
+
+            defer out.deinit();
+            try writeJsonValue(args[0], vm, &out.writer);
+            const slice = try out.toOwnedSlice();
+            const data = try vm.adoptDataString(slice);
+            return root.resultTuple(vm, .ok, data);
+        }
+    }.f) },
+    .{ .name = "decode", .f = root.def(&.{.string}, struct {
+        fn a(args: root.ArgsTuple(&.{.string}), vm: *VM) !HostResult {
+            const source = vm.stringValue(args[0]);
+            var parsed = json.parseFromSlice(json.Value, vm.runtime.alloc, source, .{}) catch |err| {
+                return resultErr(vm, @errorName(err));
+            };
+            defer parsed.deinit();
+
+            const value = try fromJsonValue(parsed.value, vm);
+            return root.resultTuple(vm, .ok, value);
+        }
+    }.a) },
 };
-
-fn encode(args: []const Data, vm: *VM) !HostResult {
-    var out = std.Io.Writer.Allocating.init(vm.runtime.alloc);
-    defer out.deinit();
-    try writeJsonValue(args[0], vm, &out.writer);
-    const slice = try out.toOwnedSlice();
-    const data = try vm.adoptDataString(slice);
-    return root.resultTuple(vm, .ok, data);
-}
-
-fn decode(args: []const Data, vm: *VM) !HostResult {
-    const source = vm.stringValue(args[0].asString().?);
-    var parsed = json.parseFromSlice(json.Value, vm.runtime.alloc, source, .{}) catch |err| {
-        return resultErr(vm, @errorName(err));
-    };
-    defer parsed.deinit();
-
-    const value = try fromJsonValue(parsed.value, vm);
-    return root.resultTuple(vm, .ok, value);
-}
 
 fn resultErr(vm: *VM, message: []const u8) !HostResult {
     return root.resultTuple(vm, .err, try vm.ownDataString(message));
@@ -195,3 +185,14 @@ test "json decode of nested objects does not use a stale table pointer" {
         \\ json.decode("{{ \"a\" : {{ \"b\" : {{ \"c\" : 42 }} }} }}"):unwrap().a.b.c
     , 42);
 }
+
+const std = @import("std");
+const json = std.json;
+
+const revo = @import("../root.zig");
+const mem = revo.memory;
+const Data = revo.Data;
+const VM = revo.VM;
+const api = @import("api.zig");
+const root = @import("root.zig");
+const HostResult = root.HostResult;

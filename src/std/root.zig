@@ -126,6 +126,59 @@ pub fn defineVariadic(
     };
 }
 
+pub fn ArgsTuple(comptime specs: []const TypeSpec) type {
+    const types: [specs.len]type = comptime blk: {
+        var result: [specs.len]type = undefined;
+        for (specs, 0..) |spec, i| {
+            result[i] = specToType(spec);
+        }
+        break :blk result;
+    };
+    return std.meta.Tuple(&types);
+}
+
+pub fn specToType(comptime spec: TypeSpec) type {
+    return switch (spec) {
+        .number => f64,
+        .string => mem.StringID,
+        .atom => mem.AtomID,
+        .function => mem.FunctionID,
+        .table => mem.TableID,
+        .tuple => mem.TupleID,
+        .bool => mem.AtomID,
+        .any => Data,
+    };
+}
+
+pub fn unwrapArgs(comptime specs: []const TypeSpec, args: []const Data) ArgsTuple(specs) {
+    var result: ArgsTuple(specs) = undefined;
+    inline for (specs, 0..) |spec, i| {
+        result[i] = switch (spec) {
+            .number => args[i].asNum().?,
+            .string => args[i].asString().?,
+            .atom => args[i].asAtom().?,
+            .function => args[i].asFunction().?,
+            .table => args[i].asTable().?,
+            .tuple => args[i].asTuple().?,
+            .bool => args[i].asAtom().?,
+            .any => args[i],
+        };
+    }
+    return result;
+}
+
+/// shorthand for auto unwrapping args. usually for anonymous functions
+pub fn def(
+    comptime specs: []const TypeSpec,
+    comptime impl: fn (args: ArgsTuple(specs), vm: *VM) anyerror!HostResult,
+) HostFunc {
+    return define(specs, struct {
+        fn call(raw: []const Data, vm: *VM) anyerror!HostResult {
+            return impl(unwrapArgs(specs, raw), vm);
+        }
+    }.call);
+}
+
 pub const ResultTag = enum { ok, err };
 
 pub const TypeSpec = union(enum) {
