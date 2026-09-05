@@ -13,7 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `promote.zig`'s `[8]Register` buffer was too small for `call_field` instructions with too many args
+- `promote.zig`'s `[8]Register` buffer was too small for `call_field`
+  instructions with too many args
+- `const x = import "raylib.so"` named imports now get the fields from the module's
+  `.d.rv` manifest just like the normal `import "raylib.so"`
 
 ## [0.1.2] - 2026-09-05
 

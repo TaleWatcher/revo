@@ -781,6 +781,43 @@ const SemanticChecker = struct {
             },
             .import_stmt => |stmt| blk: {
                 try self.declare(stmt.name, .{ .tag = .any }, null);
+                // populate table_field_map from import_fn_sigs so const
+                // bindings like `const rl = import 'raylib.so'` carry typed fields
+                if (self.import_fn_sigs.get(stmt.name)) |fn_list| {
+                    var fields = std.StringHashMap(types_mod.TypeInfo).init(self.alloc);
+                    for (fn_list.items) |meta| {
+                        var param_types =
+                            std.ArrayList(types_mod.TypeInfo)
+                                .initCapacity(self.alloc, meta.params.len) catch
+                                break :blk .{ .tag = .any };
+
+                        var param_names =
+                            std.ArrayList([]const u8)
+                                .initCapacity(self.alloc, meta.params.len) catch
+                                break :blk .{ .tag = .any };
+
+                        for (meta.params) |p| {
+                            param_names.appendAssumeCapacity(p.name);
+                            const pt = if (p.type_expr) |te| type_parser.evalTypeExpr(self, te) catch types_mod.TypeInfo{ .tag = .any } else types_mod.TypeInfo{ .tag = .any };
+                            param_types.appendAssumeCapacity(pt);
+                        }
+
+                        const ret = if (meta.return_type_expr) |rt|
+                            type_parser.evalTypeExpr(self, rt) catch types_mod.TypeInfo{ .tag = .any }
+                        else
+                            types_mod.TypeInfo{ .tag = .any };
+
+                        const names_slice = param_names
+                            .toOwnedSlice(self.alloc) catch break :blk .{ .tag = .any };
+                        const types_slice = param_types
+                            .toOwnedSlice(self.alloc) catch break :blk .{ .tag = .any };
+
+                        const sig_ptr = self.newSig(names_slice, types_slice, ret, types_slice.len, &.{}, null) catch break :blk .{ .tag = .any };
+
+                        try fields.put(meta.name, .{ .tag = .{ .function = sig_ptr } });
+                    }
+                    try self.table_field_map.put(stmt.name, fields);
+                }
                 break :blk .{ .tag = .any };
             },
             .macro_expr => |m| blk: {

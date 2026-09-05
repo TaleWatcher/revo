@@ -626,30 +626,23 @@ pub fn hover(
                 },
             };
         }
+        //
         // member of an imported module: `mod.member` - show its definition
         if (moduleMemberAt(snap.text, pos)) |mod_name| {
-            const mod_syms = self.importedModuleSymbols(alloc, id, mod_name) catch null;
+            const fid = self.resolveDepId(alloc, id, mod_name) orelse id;
+            const mod_syms = self.symbolsFromDep(alloc, fid) catch null;
             if (mod_syms) |ms| {
                 defer freeSymbols(alloc, @constCast(ms));
                 for (ms) |s| {
                     if (!std.mem.eql(u8, s.name, name)) continue;
-                    const mod_id = blk: {
-                        const deps = self.dependencyClosure(alloc, id) catch break :blk null;
-                        defer alloc.free(deps);
-                        for (deps) |dep_id| {
-                            const dep_snap = self.snapshot(dep_id) orelse continue;
-                            if (moduleFileNameMatches(dep_snap.name, mod_name))
-                                break :blk dep_id;
-                        }
-                        break :blk null;
-                    };
-                    const fid = mod_id orelse id;
                     const sym_tn = if (s.type_name) |ti| try ti.formatType(alloc) else "";
                     defer if (sym_tn.len > 0) alloc.free(sym_tn);
+
                     const display = try renderDefinition(alloc, name, sym_tn, self, fid);
                     defer alloc.free(display);
                     var buf = std.Io.Writer.Allocating.init(alloc);
                     defer buf.deinit();
+
                     try buf.writer.print("```revo\n{s}\n```", .{display});
                     return .{
                         .text = try buf.toOwnedSlice(),
@@ -692,47 +685,42 @@ pub fn hover(
     defer if (type_name.len > 0) alloc.free(type_name);
 
     // for import modules, show exported symbols with full signatures
-    if (self.importedModuleSymbols(alloc, id, name) catch null) |mod_syms| {
-        defer freeSymbols(alloc, @constCast(mod_syms));
-        if (mod_syms.len > 0) {
-            // find the dep file id so fnSig can look up each export's params
-            const mod_id = blk: {
-                const deps = self.dependencyClosure(alloc, id) catch break :blk null;
-                defer alloc.free(deps);
-                for (deps) |dep_id| {
-                    const dep_snap = self.snapshot(dep_id) orelse continue;
-                    if (moduleFileNameMatches(dep_snap.name, name)) break :blk dep_id;
-                }
-                break :blk null;
-            };
-            var buf = std.Io.Writer.Allocating.init(alloc);
-            defer buf.deinit();
-            try buf.writer.print("module `{s}`\n\n```revo\n", .{name});
-            for (mod_syms) |s| {
-                const fid = mod_id orelse id;
-                if (try self.fnSig(alloc, fid, s.name) != null) {
-                    const sym_tn = if (s.type_name) |ti| try ti.formatType(alloc) else "";
-                    defer if (sym_tn.len > 0) alloc.free(sym_tn);
-                    const display = try renderDefinition(alloc, s.name, sym_tn, self, fid);
-                    defer alloc.free(display);
-                    try buf.writer.writeAll(display);
-                } else {
-                    if (self.snapshot(fid)) |ss| {
-                        var line = sourceLine(ss.text, s.range.start.line);
-                        line = std.mem.trim(u8, line, " \t\r");
-                        line = stripPub(line);
-                        try buf.writer.writeAll(line);
+    if (self.resolveDepId(alloc, id, name)) |dep_id| {
+        const mod_syms = self.symbolsFromDep(alloc, dep_id) catch null;
+        if (mod_syms) |ms| {
+            defer freeSymbols(alloc, @constCast(ms));
+
+            if (ms.len > 0) {
+                var buf = std.Io.Writer.Allocating.init(alloc);
+                defer buf.deinit();
+                try buf.writer.print("module `{s}`\n\n```revo\n", .{name});
+
+                for (ms) |s| {
+                    if (try self.fnSig(alloc, dep_id, s.name) != null) {
+                        const sym_tn = if (s.type_name) |ti| try ti.formatType(alloc) else "";
+                        defer if (sym_tn.len > 0) alloc.free(sym_tn);
+
+                        const display = try renderDefinition(alloc, s.name, sym_tn, self, dep_id);
+                        defer alloc.free(display);
+
+                        try buf.writer.writeAll(display);
                     } else {
-                        try buf.writer.writeAll(s.name);
+                        if (self.snapshot(dep_id)) |ss| {
+                            var line = sourceLine(ss.text, s.range.start.line);
+                            line = std.mem.trim(u8, line, " \t\r");
+                            line = stripPub(line);
+                            try buf.writer.writeAll(line);
+                        } else try buf.writer.writeAll(s.name);
                     }
+                    try buf.writer.writeByte('\n');
                 }
-                try buf.writer.writeByte('\n');
+                try buf.writer.writeAll("```");
+
+                return .{
+                    .text = try buf.toOwnedSlice(),
+                    .range = def.range,
+                };
             }
-            try buf.writer.writeAll("```");
-            return .{
-                .text = try buf.toOwnedSlice(),
-                .range = def.range,
-            };
         }
     }
 
@@ -1491,27 +1479,89 @@ pub fn importedModuleSymbols(
     file_id: FileId,
     name: []const u8,
 ) ![]const Symbol {
-    const deps = try self.dependencyClosure(alloc, file_id);
+    const dep_id = self.resolveDepId(alloc, file_id, name) orelse return &.{};
+    return self.symbolsFromDep(alloc, dep_id);
+}
+
+/// copy symbols from a resolved dep file id (caller frees)
+fn symbolsFromDep(self: *Workspace, alloc: std.mem.Allocator, dep_id: FileId) ![]const Symbol {
+    var dep_analysis = try self.inspectDetailed(alloc, dep_id, .{});
+    defer dep_analysis.deinit(alloc);
+
+    const src = dep_analysis.symbols;
+    var out = try alloc.alloc(Symbol, src.len);
+
+    for (src, 0..) |s, i| {
+        out[i] = .{
+            .name = try alloc.dupe(u8, s.name),
+            .kind = s.kind,
+            .range = s.range,
+            .type_name = if (s.type_name) |ti| try types.clone(ti, alloc) else null,
+        };
+    }
+    return out;
+}
+
+/// TODO: botch. kill commit after e6f877ea when structural tables exist
+/// walk asdf of file_id looking for `const <name> = import '<path>'`
+/// and return the resolved import path (caller frees)
+fn findImportPathForBinding(self: *Workspace, alloc: std.mem.Allocator, file_id: FileId, name: []const u8) ?[]const u8 {
+    const snap = self.snapshot(file_id) orelse return null;
+    const parsed = lang.parseSourceReport(alloc, snap.text) catch return null;
+    const root = switch (parsed) {
+        .ok => |n| n,
+        .err => return null,
+    };
+
+    defer alloc.destroy(root);
+    const result = FindImportVisitor.find(root, name) orelse return null;
+    return alloc.dupe(u8, result) catch null;
+}
+
+const FindImportVisitor = struct {
+    target: []const u8,
+    result: ?[]const u8,
+
+    fn find(root: *const lang.Node, name: []const u8) ?[]const u8 {
+        var visitor = FindImportVisitor{ .target = name, .result = null };
+        lang.ast.walkAST(FindImportVisitor, &visitor, root);
+        return visitor.result;
+    }
+
+    pub fn visit(self: *@This(), node: *const lang.Node) void {
+        if (self.result != null) return;
+        if (node.expr == .decl) {
+            const d = node.expr.decl;
+            if (d.inner.expr == .binding) {
+                const b = d.inner.expr.binding;
+                if (b.target.expr == .ident and std.mem.eql(u8, b.target.expr.ident, self.target)) {
+                    if (b.value.expr == .import_stmt) {
+                        self.result = b.value.expr.import_stmt.path;
+                    }
+                }
+            }
+        }
+        lang.ast.walkAST(FindImportVisitor, self, node);
+    }
+};
+
+/// find the dep file id for a module name — tries filename match first,
+/// then falls back to resolving `const <name> = import '<path>'` in the AST
+fn resolveDepId(self: *Workspace, alloc: std.mem.Allocator, file_id: FileId, mod_name: []const u8) ?FileId {
+    const deps = self.dependencyClosure(alloc, file_id) catch return null;
     defer alloc.free(deps);
     for (deps) |dep_id| {
         const dep_snap = self.snapshot(dep_id) orelse continue;
-        if (moduleFileNameMatches(dep_snap.name, name)) {
-            var dep_analysis = try self.inspectDetailed(alloc, dep_id, .{});
-            defer dep_analysis.deinit(alloc);
-            const src = dep_analysis.symbols;
-            var out = try alloc.alloc(Symbol, src.len);
-            for (src, 0..) |s, i| {
-                out[i] = .{
-                    .name = try alloc.dupe(u8, s.name),
-                    .kind = s.kind,
-                    .range = s.range,
-                    .type_name = if (s.type_name) |ti| try types.clone(ti, alloc) else null,
-                };
-            }
-            return out;
-        }
+        if (moduleFileNameMatches(dep_snap.name, mod_name)) return dep_id;
     }
-    return &.{};
+
+    // fallback: resolve via const binding import path
+    const import_path = self.findImportPathForBinding(alloc, file_id, mod_name) orelse return null;
+    defer alloc.free(import_path);
+    const snap = self.snapshot(file_id) orelse return null;
+    const file_entry = self.entryPtr(file_id) catch return null;
+
+    return self.resolveOpenImportOrOpen(snap.name, import_path, .project, file_entry.project_root);
 }
 
 /// resolve an import and open the file from disk if not already open, checking
