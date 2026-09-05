@@ -43,7 +43,7 @@ pub fn promoteLoopCarried(self: *Compiler) !void {
     // can live above it
     var max_touched: usize = 0;
     for (insts) |inst| {
-        var buf: [8]Register = undefined;
+        var buf: [128]Register = undefined;
         const rcnt = dce.readRegs(inst, &buf);
         var high: usize = inst.result_reg;
         for (buf[0..rcnt]) |r| high = @max(high, r);
@@ -513,7 +513,7 @@ fn scanRemats(
             if (writesReg(inst, c.r_old)) st = .none;
             continue;
         }
-        var rbuf: [8]Register = undefined;
+        var rbuf: [128]Register = undefined;
         const rcnt = dce.readRegs(inst, &rbuf);
         var reads_old = false;
         for (rbuf[0..rcnt]) |r| {

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
+### Fixed
+
+- `promote.zig`'s `[8]Register` buffer was too small for `call_field` instructions with too many args
+
 ## [0.1.2] - 2026-09-05
 
 big release - many misc bugs are fixed but not noted
