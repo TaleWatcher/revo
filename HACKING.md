@@ -95,9 +95,12 @@ the `2-way` here is close-ish to the the one described in [the Holzle/Chambers/U
 
 ## stdlib (`src/std/`)
 
-the surface is at `iface/*.d.rv`, files carry doc-comment+declatarion sigs; `api.zig` merges them with the zig `impls` at boot (`register_stdlib`) into `full_specs`, keyed on the bare name, so the doc set always matches the runtime. the primitive type metatable _is_ the module table, so `x:method()` dispatch is a single lookup
+to make a new module:
+~ copy any existing library - both its `foo.zig` implementation and the `iface/foo.d.rv` declaration\
+~ add it into `iface_groups` and `impl_groups` in `api.zig` (i know, it's not the prettiest)
 
-whenever you want to add a function, add the related declaration into iface
+how it works:\
+the surface is at `iface/*.d.rv`, files carry doc-comment+declatarion sigs; `api.zig` merges them with the zig `impls` at boot (`register_stdlib`) into `full_specs`, keyed on the bare name, so the doc set always matches the runtime. the primitive type metatable _is_ the module table, so `x:method()` dispatch is a single lookup
 
 ## c api, lsp, wasm, repl
 
