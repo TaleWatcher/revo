@@ -255,10 +255,12 @@ pub fn evalTypeExpr(ctx: anytype, te: *const ast.TypeExpr) !TypeInfo {
             for (f.params) |p| {
                 try param_types.append(ctx.alloc, if (p.type_name) |tn| try evalTypeExpr(ctx, tn) else .{ .tag = .any });
             }
+
             var param_names = try std.ArrayList([]const u8).initCapacity(ctx.alloc, f.params.len);
             errdefer param_names.deinit(ctx.alloc);
             for (f.params) |p| try param_names.append(ctx.alloc, p.name);
             const return_type = if (f.return_type) |rt| try evalTypeExpr(ctx, rt) else TypeInfo{ .tag = .any };
+
             const sig = try ctx.alloc.create(types.FunctionSignature);
             sig.* = .{
                 .param_names = try param_names.toOwnedSlice(ctx.alloc),
@@ -266,6 +268,7 @@ pub fn evalTypeExpr(ctx: anytype, te: *const ast.TypeExpr) !TypeInfo {
                 .return_type = return_type,
                 .required_count = param_types.items.len,
             };
+
             return .{ .tag = .{ .function = sig } };
         },
         // "table<int>" -> table(key=null, value=int), "table<string, int>" -> table(key=string, value=int)

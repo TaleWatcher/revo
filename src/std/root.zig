@@ -147,6 +147,7 @@ pub const HostFn = *const fn (args: []const Data, vm: *VM) anyerror!HostResult;
 pub const HostFunc = struct {
     name: []const u8 = "",
     arity: usize,
+    total_arity: usize = 0,
     variadic: bool = false,
     param_types: []const TypeSpec,
     ret_type: TypeSpec = .any,
@@ -195,7 +196,7 @@ pub fn specToType(comptime spec: TypeSpec) type {
         .function => T.function,
         .table => T.table,
         .tuple => T.tuple,
-        .bool => mem.AtomID,
+        .bool => bool,
         .any => Data,
     };
 }
@@ -1336,11 +1337,25 @@ pub const T = struct {
     pub const table = enum(mem.TableID) { _ };
     pub const tuple = enum(mem.TupleID) { _ };
     pub const any = Data;
+
+    /// usage: `T.Optional(.bool, false)`, `T.Optional(.number, 10.0)`
+    pub fn Optional(comptime spec: TypeSpec, comptime default_val: anytype) type {
+        const VT = switch (spec) {
+            .bool => bool,
+            else => specToType(spec),
+        };
+        return extern struct {
+            pub const inner_spec = spec;
+            pub const default_value: VT = default_val;
+            value: VT,
+        };
+    }
 };
 
 /// reverse mapping
 /// distinct T type -> TypeSpec variant
 pub fn typeToSpec(comptime P: type) TypeSpec {
+    if (isOptional(P)) return P.inner_spec; // unwrap Optional
     if (P == T.string) return .string;
     if (P == T.number) return .number;
     if (P == T.atom) return .atom;
@@ -1382,26 +1397,68 @@ pub fn def(comptime impl: anytype) HostFunc {
             }
             break :blk result;
         };
+        pub const required_count: usize = blk: {
+            var n: usize = 0;
+            for (fn_info.params[1..]) |param| {
+                if (!isOptional(param.type.?)) n += 1;
+            }
+            break :blk n;
+        };
         pub const all_types: [count + 1]type = blk: {
             var result: [count + 1]type = undefined;
             result[0] = *VM;
-            for (specs, 0..) |spec, i| {
-                result[i + 1] = specToType(spec);
+            for (fn_info.params[1..], 0..) |param, i| {
+                result[i + 1] = param.type.?;
             }
             break :blk result;
         };
         pub const FullArgs = std.meta.Tuple(&all_types);
     };
-    return define(&Storage.specs, struct {
-        fn call(raw: []const Data, vm: *VM) anyerror!HostResult {
-            var args: Storage.FullArgs = undefined;
-            args[0] = vm;
-            inline for (Storage.specs, 0..) |spec, i| {
-                args[i + 1] = unwrapArg(spec, raw[i]);
+
+    const has_optionals = Storage.required_count < count;
+    return .{
+        .arity = Storage.required_count,
+        .total_arity = if (has_optionals) count else 0,
+        .param_types = &Storage.specs,
+        .func = struct {
+            fn call(raw: []const Data, vm: *VM) anyerror!HostResult {
+                var args: Storage.FullArgs = undefined;
+                args[0] = vm;
+                inline for (Storage.specs, 0..) |spec, i| {
+                    const P = fn_info.params[i + 1].type.?;
+                    if (i < raw.len) {
+                        const val = unwrapArg(spec, raw[i]);
+                        args[i + 1] = if (comptime isOptional(P)) .{ .value = val } else val;
+                    } else {
+                        if (comptime isOptional(P)) {
+                            args[i + 1] = getDefault(i, vm) catch |e| return e;
+                        } else {
+                            unreachable;
+                        }
+                    }
+                }
+                return @call(.auto, impl, args);
             }
-            return @call(.auto, impl, args);
-        }
-    }.call);
+            fn getDefault(comptime i: usize, vm: *VM) !fn_info.params[i + 1].type.? {
+                const OptionalType = fn_info.params[i + 1].type.?;
+                const default = OptionalType.default_value;
+                const spec = Storage.specs[i];
+                const inner = switch (spec) {
+                    .string => @as(T.string, @enumFromInt(try vm.strings.own(default))),
+                    else => default,
+                };
+                return .{ .value = inner };
+            }
+        }.call,
+    };
+}
+
+fn isOptional(comptime P: type) bool {
+    return switch (@typeInfo(P)) {
+        // it's fine
+        .@"struct", .@"enum", .@"union", .@"opaque" => @hasDecl(P, "inner_spec"),
+        else => false,
+    };
 }
 
 fn countFn(comptime S: type) comptime_int {
