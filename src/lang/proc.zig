@@ -926,7 +926,7 @@ fn iter(args: []const Data, vm: *revo.VM) !revo.std_lib.HostResult {
         .table, .tuple => args[0],
         else => return .errType(0, "table or tuple", revo.std_lib.typeof(args[0], vm)),
     };
-    return .okData(try makeIterValue(vm, items));
+    return .data(try makeIterValue(vm, items));
 }
 
 fn next(args: []const Data, vm: *revo.VM) !revo.std_lib.HostResult {
@@ -1000,7 +1000,7 @@ fn procApply(args: []const Data, vm: *revo.VM) !revo.std_lib.HostResult {
 
     const iter_value = try makeIterValue(vm, args[1]);
     const result = try vm.callFunctionParts(callee, null, &.{iter_value}, null);
-    return .okData(try normalizeProcValue(vm, result));
+    return .data(try normalizeProcValue(vm, result));
 }
 
 fn makeIterValue(vm: *revo.VM, items: Data) !Data {

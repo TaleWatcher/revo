@@ -1,32 +1,35 @@
-pub const impls: []const api.Impl = &.{
-    .{ .name = "now", .f = root.define(&.{}, now_ms) },
-    .{ .name = "now_ns", .f = root.define(&.{}, now_ns) },
-    .{ .name = "monotonic", .f = root.define(&.{}, monotonic_ms) },
-    .{ .name = "monotonic_ns", .f = root.define(&.{}, monotonic_ns) },
-    .{ .name = "sleep", .f = root.define(&.{.number}, root.sleep) },
+pub const Impl = struct {
+    pub fn now(vm: *VM) !HostResult {
+        const ts = std.Io.Clock.real.now(vm.runtime.io);
+        return .data(Data.new.num(ts.toMilliseconds()));
+    }
+
+    pub fn now_ns(vm: *VM) !HostResult {
+        const ts = std.Io.Clock.real.now(vm.runtime.io);
+        if (vm.runtime.time_wall_base == 0) vm.runtime.time_wall_base = ts.nanoseconds;
+        return .data(Data.new.num(ts.nanoseconds - vm.runtime.time_wall_base));
+    }
+
+    pub fn monotonic(vm: *VM) !HostResult {
+        const ts = std.Io.Clock.awake.now(vm.runtime.io);
+        return .data(Data.new.num(ts.toMilliseconds()));
+    }
+
+    pub fn monotonic_ns(vm: *VM) !HostResult {
+        const ts = std.Io.Clock.awake.now(vm.runtime.io);
+        if (vm.runtime.time_mono_base == 0) vm.runtime.time_mono_base = ts.nanoseconds;
+        return .data(Data.new.num(ts.nanoseconds - vm.runtime.time_mono_base));
+    }
+
+    pub fn sleep(vm: *VM, ms: Ts.number) !HostResult {
+        const ms_int: u64 = root.numToInt(u64, ms) orelse return .errType(0, "non-negative integer", "number");
+        try vm.schedParkCurrentForSleepMS(ms_int);
+        return .parked();
+    }
 };
 
-fn now_ms(_: []const Data, vm: *VM) !HostResult {
-    const ts = std.Io.Clock.real.now(vm.runtime.io);
-    return .{ .ok = Data.new.num(ts.toMilliseconds()) };
-}
-
-fn now_ns(_: []const Data, vm: *VM) !HostResult {
-    const ts = std.Io.Clock.real.now(vm.runtime.io);
-    if (vm.runtime.time_wall_base == 0) vm.runtime.time_wall_base = ts.nanoseconds;
-    return .{ .ok = Data.new.num(ts.nanoseconds - vm.runtime.time_wall_base) };
-}
-
-fn monotonic_ms(_: []const Data, vm: *VM) !HostResult {
-    const ts = std.Io.Clock.awake.now(vm.runtime.io);
-    return .{ .ok = Data.new.num(ts.toMilliseconds()) };
-}
-
-fn monotonic_ns(_: []const Data, vm: *VM) !HostResult {
-    const ts = std.Io.Clock.awake.now(vm.runtime.io);
-    if (vm.runtime.time_mono_base == 0) vm.runtime.time_mono_base = ts.nanoseconds;
-    return .{ .ok = Data.new.num(ts.nanoseconds - vm.runtime.time_mono_base) };
-}
+const Ts = root.T;
+pub const impls = root.impls(Impl).val;
 
 test "time module works probably" {
     const testing = revo.lang.testing;

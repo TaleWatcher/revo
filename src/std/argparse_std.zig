@@ -8,11 +8,157 @@ const Data = revo.Data;
 const VM = revo.VM;
 const mem = revo.vm.memory;
 const HostResult = root.HostResult;
+const Ts = root.T;
 
-pub const impls: []const api.Impl = &.{
-    .{ .name = "parse", .f = root.define(&.{ .function, .table }, parseFn) },
-    .{ .name = "usage", .f = root.define(&.{.table}, usageFn) },
+pub const Impl = struct {
+    pub fn parse(vm: *VM, builder_fn: Ts.function, argv_tbl: Ts.table) !HostResult {
+        const alloc = vm.runtime.alloc;
+
+        const arg_defs = try alloc.create(std.ArrayList(argparse.Arg));
+        arg_defs.* = .empty;
+
+        const cmd_defs = try alloc.create(std.ArrayList(argparse.Command));
+        cmd_defs.* = .empty;
+
+        const builder_id = try vm.tables.create();
+        const builder = try vm.tables.get(builder_id);
+        try builder.putRawAtom(try vm.internAtom("_args_ptr"), Data.new.foreign(arg_defs), vm);
+        try builder.putRawAtom(try vm.internAtom("_cmds_ptr"), Data.new.foreign(cmd_defs), vm);
+
+        const install = struct {
+            fn go(vm_: *VM, tbl: anytype, comptime name: []const u8, func: root.HostFn) !void {
+                const fn_id = try vm_.installHost(name, .{
+                    .arity = 1,
+                    .variadic = true,
+                    .param_types = &.{.any},
+                    .func = func,
+                });
+                try tbl.putRawAtom(try vm_.internAtom(name), Data.new.function(fn_id), vm_);
+            }
+        };
+        try install.go(vm, builder, "flag", builderFlagFn);
+        try install.go(vm, builder, "option", builderOptionFn);
+        try install.go(vm, builder, "command", builderCommandFn);
+        try install.go(vm, builder, "positional", builderPositionalFn);
+
+        _ = try vm.callFunctionParts(Data.new.function(@intFromEnum(builder_fn)), null, &[_]Data{Data.new.table(builder_id)}, null);
+
+        const argv = try vm.tables.get(@intFromEnum(argv_tbl));
+        var argv_buf: [128][:0]const u8 = undefined;
+        const raw_len = argv.array.items.len;
+        const start: usize = if (raw_len > 1) 1 else 0;
+        const len = @min(raw_len - start, 128);
+        for (0..len) |i| {
+            const item = argv.array.items[start + i];
+            argv_buf[i] = if (item.asString()) |sid|
+                try alloc.dupeZ(u8, vm.stringValue(sid))
+            else
+                "";
+        }
+
+        var leftover: std.ArrayList([:0]const u8) = .empty;
+        defer leftover.deinit(alloc);
+
+        var res = argparse.Result{
+            .args = arg_defs.items,
+            .commands = cmd_defs.items,
+            .leftover = &leftover,
+        };
+
+        argparse.parse(alloc, argv_buf[0..len], &res) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnexpectedLongArg, error.UnexpectedShortArg, error.MissingValue => {
+                const err_table_id = try vm.tables.create();
+                const err_table = try vm.tables.get(err_table_id);
+                if (res.err_token) |token| {
+                    try err_table.putRawAtom(try vm.internAtom("token"), try vm.ownDataString(token), vm);
+                }
+                const msg = switch (err) {
+                    error.UnexpectedLongArg => "unexpected long arg",
+                    error.UnexpectedShortArg => "unexpected short arg",
+                    error.MissingValue => "missing value",
+                    else => unreachable,
+                };
+                try err_table.putRawAtom(try vm.internAtom("message"), try vm.ownDataString(msg), vm);
+
+                const result_id = try vm.tables.create();
+                const result = try vm.tables.get(result_id);
+                try result.putRawAtom(try vm.internAtom("err"), Data.new.table(err_table_id), vm);
+                try result.putRawAtom(try vm.internAtom("flags"), Data.new.core(.nil), vm);
+                try result.putRawAtom(try vm.internAtom("commands"), Data.new.core(.nil), vm);
+                try result.putRawAtom(try vm.internAtom("positionals"), Data.new.core(.nil), vm);
+                try result.putRawAtom(try vm.internAtom("leftover"), Data.new.core(.nil), vm);
+                try result.putRawAtom(try vm.internAtom("_args"), Data.new.foreign(arg_defs), vm);
+                try result.putRawAtom(try vm.internAtom("_cmds"), Data.new.foreign(cmd_defs), vm);
+                return .data(Data.new.table(result_id));
+            },
+        };
+
+        const result_id = try vm.tables.create();
+        const result = try vm.tables.get(result_id);
+
+        const flags_id = try vm.tables.create();
+        const flags = try vm.tables.get(flags_id);
+        for (arg_defs.items) |*arg| {
+            if (arg.kind == .positional) continue;
+            const nm = try vm.internAtom(arg.name);
+            if (arg.kind == .boolean) {
+                try flags.putRawAtom(nm, Data.new.boolean(arg.enabled), vm);
+            } else if (arg.value) |v| {
+                try flags.putRawAtom(nm, try vm.ownDataString(v), vm);
+            }
+        }
+        try result.putRawAtom(try vm.internAtom("flags"), Data.new.table(flags_id), vm);
+
+        const cmds_id = try vm.tables.create();
+        const cmds = try vm.tables.get(cmds_id);
+        for (cmd_defs.items) |*cmd| {
+            try cmds.putRawAtom(try vm.internAtom(cmd.name), Data.new.boolean(cmd.triggered), vm);
+        }
+        try result.putRawAtom(try vm.internAtom("commands"), Data.new.table(cmds_id), vm);
+
+        const pos_id = try vm.tables.create();
+        const pos = try vm.tables.get(pos_id);
+        for (arg_defs.items) |*arg| {
+            if (arg.kind != .positional) continue;
+            if (arg.value) |v| {
+                try pos.putRawAtom(try vm.internAtom(arg.name), try vm.ownDataString(v), vm);
+            }
+        }
+        try result.putRawAtom(try vm.internAtom("positionals"), Data.new.table(pos_id), vm);
+
+        const lo_id = try vm.tables.create();
+        const lo = try vm.tables.get(lo_id);
+        for (leftover.items) |item| {
+            try lo.push(try vm.ownDataString(item));
+        }
+        try result.putRawAtom(try vm.internAtom("leftover"), Data.new.table(lo_id), vm);
+
+        try result.putRawAtom(try vm.internAtom("err"), Data.new.core(.nil), vm);
+        try result.putRawAtom(try vm.internAtom("_args"), Data.new.foreign(arg_defs), vm);
+        try result.putRawAtom(try vm.internAtom("_cmds"), Data.new.foreign(cmd_defs), vm);
+
+        return .data(Data.new.table(result_id));
+    }
+    pub fn usage(vm: *VM, result_tbl: Ts.table) !HostResult {
+        const result = try vm.tables.get(@intFromEnum(result_tbl));
+
+        const arg_defs_ptr = result.getRawAtom(try vm.internAtom("_args"), vm) orelse return error.InvalidState;
+        const cmd_defs_ptr = result.getRawAtom(try vm.internAtom("_cmds"), vm) orelse return error.InvalidState;
+
+        const arg_defs: *std.ArrayList(argparse.Arg) = @ptrCast(@alignCast(arg_defs_ptr.asForeign().?));
+        const cmd_defs: *std.ArrayList(argparse.Command) = @ptrCast(@alignCast(cmd_defs_ptr.asForeign().?));
+
+        const text = try argparse.usage(vm.runtime.alloc, arg_defs.items, cmd_defs.items);
+        defer vm.runtime.alloc.free(text);
+
+        return .data(try vm.ownDataString(text));
+    }
 };
+
+pub const impls = root.impls(Impl).val;
+
+// -- [builder methods] -------------------------------------------------------
 
 fn isTrue(d: Data) bool {
     if (d.asAtom()) |a| return a == revo.core_atoms.atomId(.true);
@@ -30,8 +176,6 @@ fn tableBool(table: anytype, vm: *VM, id: mem.AtomID) bool {
     if (table.getRawAtom(id, vm)) |v| return isTrue(v);
     return false;
 }
-
-// -- [builder methods] -------------------------------------------------------
 
 fn builderFlagFn(args: []const Data, vm: *VM) !HostResult {
     return builderAddArgFn(args, vm, .boolean);
@@ -83,7 +227,7 @@ fn builderAddArgFn(args: []const Data, vm: *VM, kind: ArgKind) !HostResult {
         .passthrough = passthrough,
     });
 
-    return .{ .ok = args[0] };
+    return .data(args[0]);
 }
 
 fn builderCommandFn(args: []const Data, vm: *VM) !HostResult {
@@ -109,170 +253,5 @@ fn builderCommandFn(args: []const Data, vm: *VM) !HostResult {
         .prefix = prefix,
     });
 
-    return .{ .ok = args[0] };
-}
-
-// -- [parse] -----------------------------------------------------------------
-
-fn parseFn(args: []const Data, vm: *VM) !HostResult {
-    const alloc = vm.runtime.alloc;
-
-    if (!args[0].isFunction()) return .errType(0, "function", root.typeof(args[0], vm));
-    if (!args[1].isTable()) return .errType(1, "table", root.typeof(args[1], vm));
-
-    // heap-allocated so pointers survive past this frame (usage reads them later)
-    // intentionally not freed & lives for the VM's lifetime
-    const arg_defs = try alloc.create(std.ArrayList(argparse.Arg));
-    arg_defs.* = .empty;
-
-    const cmd_defs = try alloc.create(std.ArrayList(argparse.Command));
-    cmd_defs.* = .empty;
-
-    // builder table;
-    //   methods write directly into the zig arraylists
-    const builder_id = try vm.tables.create();
-    const builder = try vm.tables.get(builder_id);
-    try builder.putRawAtom(try vm.internAtom("_args_ptr"), Data.new.foreign(arg_defs), vm);
-    try builder.putRawAtom(try vm.internAtom("_cmds_ptr"), Data.new.foreign(cmd_defs), vm);
-
-    const install = struct {
-        fn go(vm_: *VM, tbl: anytype, comptime name: []const u8, func: root.HostFn) !void {
-            const fn_id = try vm_.installHost(name, .{
-                .arity = 1,
-                .variadic = true,
-                .param_types = &.{.any},
-                .func = func,
-            });
-            try tbl.putRawAtom(try vm_.internAtom(name), Data.new.function(fn_id), vm_);
-        }
-    };
-    try install.go(vm, builder, "flag", builderFlagFn);
-    try install.go(vm, builder, "option", builderOptionFn);
-    try install.go(vm, builder, "command", builderCommandFn);
-    try install.go(vm, builder, "positional", builderPositionalFn);
-
-    // call user callback
-    _ = try vm.callFunctionParts(args[0], null, &[_]Data{Data.new.table(builder_id)}, null);
-
-    // read argv; convert to [:0]const u8, skip argv[0]
-    const argv_tbl = try vm.tables.get(args[1].asTable().?);
-    var argv_buf: [128][:0]const u8 = undefined;
-    const raw_len = argv_tbl.array.items.len;
-    const start: usize = if (raw_len > 1) 1 else 0;
-    const len = @min(raw_len - start, 128);
-    for (0..len) |i| {
-        const item = argv_tbl.array.items[start + i];
-        argv_buf[i] = if (item.asString()) |sid|
-            try alloc.dupeZ(u8, vm.stringValue(sid))
-        else
-            "";
-    }
-
-    // parse
-    var leftover: std.ArrayList([:0]const u8) = .empty;
-    defer leftover.deinit(alloc);
-
-    var res = argparse.Result{
-        .args = arg_defs.items,
-        .commands = cmd_defs.items,
-        .leftover = &leftover,
-    };
-
-    argparse.parse(alloc, argv_buf[0..len], &res) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.UnexpectedLongArg, error.UnexpectedShortArg, error.MissingValue => {
-            const err_table_id = try vm.tables.create();
-            const err_table = try vm.tables.get(err_table_id);
-            if (res.err_token) |token| {
-                try err_table.putRawAtom(try vm.internAtom("token"), try vm.ownDataString(token), vm);
-            }
-            const msg = switch (err) {
-                error.UnexpectedLongArg => "unexpected long arg",
-                error.UnexpectedShortArg => "unexpected short arg",
-                error.MissingValue => "missing value",
-                else => unreachable,
-            };
-            try err_table.putRawAtom(try vm.internAtom("message"), try vm.ownDataString(msg), vm);
-
-            const result_id = try vm.tables.create();
-            const result = try vm.tables.get(result_id);
-            try result.putRawAtom(try vm.internAtom("err"), Data.new.table(err_table_id), vm);
-            try result.putRawAtom(try vm.internAtom("flags"), Data.new.core(.nil), vm);
-            try result.putRawAtom(try vm.internAtom("commands"), Data.new.core(.nil), vm);
-            try result.putRawAtom(try vm.internAtom("positionals"), Data.new.core(.nil), vm);
-            try result.putRawAtom(try vm.internAtom("leftover"), Data.new.core(.nil), vm);
-            try result.putRawAtom(try vm.internAtom("_args"), Data.new.foreign(arg_defs), vm);
-            try result.putRawAtom(try vm.internAtom("_cmds"), Data.new.foreign(cmd_defs), vm);
-            return .okData(Data.new.table(result_id));
-        },
-    };
-
-    // build result table
-    const result_id = try vm.tables.create();
-    const result = try vm.tables.get(result_id);
-
-    // flags
-    const flags_id = try vm.tables.create();
-    const flags = try vm.tables.get(flags_id);
-    for (arg_defs.items) |*arg| {
-        if (arg.kind == .positional) continue;
-        const nm = try vm.internAtom(arg.name);
-        if (arg.kind == .boolean) {
-            try flags.putRawAtom(nm, Data.new.boolean(arg.enabled), vm);
-        } else if (arg.value) |v| {
-            try flags.putRawAtom(nm, try vm.ownDataString(v), vm);
-        }
-    }
-    try result.putRawAtom(try vm.internAtom("flags"), Data.new.table(flags_id), vm);
-
-    // commands
-    const cmds_id = try vm.tables.create();
-    const cmds = try vm.tables.get(cmds_id);
-    for (cmd_defs.items) |*cmd| {
-        try cmds.putRawAtom(try vm.internAtom(cmd.name), Data.new.boolean(cmd.triggered), vm);
-    }
-    try result.putRawAtom(try vm.internAtom("commands"), Data.new.table(cmds_id), vm);
-
-    // positionals
-    const pos_id = try vm.tables.create();
-    const pos = try vm.tables.get(pos_id);
-    for (arg_defs.items) |*arg| {
-        if (arg.kind != .positional) continue;
-        if (arg.value) |v| {
-            try pos.putRawAtom(try vm.internAtom(arg.name), try vm.ownDataString(v), vm);
-        }
-    }
-    try result.putRawAtom(try vm.internAtom("positionals"), Data.new.table(pos_id), vm);
-
-    // leftover
-    const lo_id = try vm.tables.create();
-    const lo = try vm.tables.get(lo_id);
-    for (leftover.items) |item| {
-        try lo.push(try vm.ownDataString(item));
-    }
-    try result.putRawAtom(try vm.internAtom("leftover"), Data.new.table(lo_id), vm);
-
-    try result.putRawAtom(try vm.internAtom("err"), Data.new.core(.nil), vm);
-    try result.putRawAtom(try vm.internAtom("_args"), Data.new.foreign(arg_defs), vm);
-    try result.putRawAtom(try vm.internAtom("_cmds"), Data.new.foreign(cmd_defs), vm);
-
-    return .okData(Data.new.table(result_id));
-}
-
-// -- [usage] -----------------------------------------------------------------
-
-fn usageFn(args: []const Data, vm: *VM) !HostResult {
-    const result_id = args[0].asTable() orelse return .errType(0, "table", root.typeof(args[0], vm));
-    const result = try vm.tables.get(result_id);
-
-    const arg_defs_ptr = result.getRawAtom(try vm.internAtom("_args"), vm) orelse return error.InvalidState;
-    const cmd_defs_ptr = result.getRawAtom(try vm.internAtom("_cmds"), vm) orelse return error.InvalidState;
-
-    const arg_defs: *std.ArrayList(argparse.Arg) = @ptrCast(@alignCast(arg_defs_ptr.asForeign().?));
-    const cmd_defs: *std.ArrayList(argparse.Command) = @ptrCast(@alignCast(cmd_defs_ptr.asForeign().?));
-
-    const text = try argparse.usage(vm.runtime.alloc, arg_defs.items, cmd_defs.items);
-    defer vm.runtime.alloc.free(text);
-
-    return .okData(try vm.ownDataString(text));
+    return .data(args[0]);
 }

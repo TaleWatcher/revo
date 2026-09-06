@@ -1,31 +1,158 @@
-// all iterator fns live only under the `iter` module. `to_iter` stays a
-// global: the for-loop compiler emits `load_global to_iter` directly
+const Ts = root.T;
 
-pub const impls: []const api.Impl = &.{
-    // zig fmt: off
-    .{ .name = "to_iter", .f = root.define(&.{.any}, to_iter), },
-    .{ .name = "to_iter", .f = root.define(&.{.any}, to_iter), },
-    .{ .name = "range", .f = root.defineVariadic(&.{.any}, range_fn), },
-    .{ .name = "map", .f = root.define(&.{ .any, .function }, transformFn(.map)), },
-    .{ .name = "filter", .f = root.define(&.{ .any, .function }, transformFn(.filter)), },
-    .{ .name = "take", .f = root.define(&.{ .any, .any }, boundedFn(.take)), },
-    .{ .name = "drop", .f = root.define(&.{ .any, .any }, boundedFn(.drop)), },
-    .{ .name = "zip", .f = root.defineVariadic(&.{.any}, zip_fn), },
-    .{ .name = "enumerate", .f = root.define(&.{.any}, enumerate_fn), },
-    .{ .name = "chunk", .f = root.define(&.{ .any, .any }, boundedFn(.chunk)), },
-    .{ .name = "flat_map", .f = root.define(&.{ .any, .function }, transformFn(.flat_map)), },
-    .{ .name = "collect", .f = root.define(&.{.any}, collect_fn), },
-    .{ .name = "collect_string", .f = root.define(&.{.any}, collect_string_fn), },
-    .{ .name = "reduce", .f = root.define(&.{ .any, .function, .any }, reduce_fn), },
-    .{ .name = "fold", .f = root.define(&.{ .any, .function }, fold_fn), },
-    .{ .name = "each", .f = root.define(&.{ .any, .function }, each_fn), },
-    .{ .name = "find", .f = root.define(&.{ .any, .function }, find_fn), },
-    .{ .name = "all?", .f = root.define(&.{ .any, .function }, all_fn), },
-    .{ .name = "any?", .f = root.define(&.{ .any, .function }, any_fn), },
-    .{ .name = "count", .f = root.defineVariadic(&.{.any}, count_fn), },
-    .{ .name = "sum", .f = root.define(&.{.any}, sum_fn), },
-    // zig fmt: on
+pub const Impl = struct {
+    pub fn to_iter(vm: *VM, obj: Ts.any) !HostResult {
+        const w = (try wrapIterable(vm, obj)) orelse
+            return .errType(0, "iterable", typeof(obj, vm));
+        if (w.isString() or w.isTuple() or w.isTable())
+            return makeSeqIterator(vm, w);
+        return .data(w);
+    }
+
+    pub fn enumerate(vm: *VM, obj: Ts.any) !HostResult {
+        const up = (try wrapIterable(vm, obj)) orelse
+            return .errType(0, "iterable", typeof(obj, vm));
+        const it_id = try makeIterator(vm, .enumerate);
+        try putState(vm, it_id, .up, up);
+        return .data(Data.new.table(it_id));
+    }
+
+    pub fn collect(vm: *VM, obj: Ts.any) !HostResult {
+        const st_id = toState(vm, obj) catch
+            return .errType(0, "iterable", typeof(obj, vm));
+        const out_id = try vm.tables.create();
+        var v: Data = undefined;
+        var idx: Data = undefined;
+        while (try pullStep(vm, st_id, &v, &idx))
+            try (try vm.tables.get(out_id)).array.append(vm.runtime.alloc, v);
+        return .data(Data.new.table(out_id));
+    }
+
+    pub fn collect_string(vm: *VM, obj: Ts.any) !HostResult {
+        const st_id = toState(vm, obj) catch
+            return .errType(0, "iterable", typeof(obj, vm));
+        var buf = try std.ArrayList(u8).initCapacity(vm.runtime.alloc, 0);
+        defer buf.deinit(vm.runtime.alloc);
+        var v: Data = undefined;
+        var idx: Data = undefined;
+        while (try pullStep(vm, st_id, &v, &idx)) {
+            if (v.asString()) |s| {
+                try buf.appendSlice(vm.runtime.alloc, vm.stringValue(s));
+            } else if (v.asNum()) |n| {
+                try buf.append(vm.runtime.alloc, @as(u8, @intFromFloat(std.math.clamp(@round(n), 0, 255))));
+            } else {
+                return .errType(0, "string or num", typeof(v, vm));
+            }
+        }
+        return .data(try vm.adoptDataString(try buf.toOwnedSlice(vm.runtime.alloc)));
+    }
+
+    pub fn each(vm: *VM, obj: Ts.any, f: Ts.function) !HostResult {
+        const st_id = toState(vm, obj) catch
+            return .errType(0, "iterable", typeof(obj, vm));
+        var v: Data = undefined;
+        var idx: Data = undefined;
+        while (try pullStep(vm, st_id, &v, &idx))
+            _ = try callPred(vm, Data.new.function(@intFromEnum(f)), v, idx);
+        return HostResult.coreAtom(.ok);
+    }
+
+    pub fn find(vm: *VM, obj: Ts.any, f: Ts.function) !HostResult {
+        const st_id = toState(vm, obj) catch
+            return .errType(0, "iterable", typeof(obj, vm));
+        var v: Data = undefined;
+        var idx: Data = undefined;
+        while (try pullStep(vm, st_id, &v, &idx)) {
+            if (isTruthy(try callPred(vm, Data.new.function(@intFromEnum(f)), v, idx))) return .data(v);
+        }
+        return .data(revo.Data.new.core(.nil));
+    }
+
+    pub fn @"all?"(vm: *VM, obj: Ts.any, f: Ts.function) !HostResult {
+        const st_id = toState(vm, obj) catch
+            return .errType(0, "iterable", typeof(obj, vm));
+        var v: Data = undefined;
+        var idx: Data = undefined;
+        while (try pullStep(vm, st_id, &v, &idx)) {
+            if (!isTruthy(try callPred(vm, Data.new.function(@intFromEnum(f)), v, idx))) return ._bool(false);
+        }
+        return ._bool(true);
+    }
+
+    pub fn @"any?"(vm: *VM, obj: Ts.any, f: Ts.function) !HostResult {
+        const st_id = toState(vm, obj) catch
+            return .errType(0, "iterable", typeof(obj, vm));
+        var v: Data = undefined;
+        var idx: Data = undefined;
+        while (try pullStep(vm, st_id, &v, &idx)) {
+            if (isTruthy(try callPred(vm, Data.new.function(@intFromEnum(f)), v, idx))) return ._bool(true);
+        }
+        return ._bool(false);
+    }
+
+    pub fn reduce(vm: *VM, obj: Ts.any, f: Ts.function, init: Ts.any) !HostResult {
+        const st_id = toState(vm, obj) catch
+            return .errType(0, "iterable", typeof(obj, vm));
+        var acc = init;
+        var v: Data = undefined;
+        var idx: Data = undefined;
+        while (try pullStep(vm, st_id, &v, &idx))
+            acc = try vm.callFunctionParts(Data.new.function(@intFromEnum(f)), null, &[_]Data{ acc, v }, null);
+        return .data(acc);
+    }
+
+    pub fn fold(vm: *VM, obj: Ts.any, f: Ts.function) !HostResult {
+        const st_id = toState(vm, obj) catch
+            return .errType(0, "iterable", typeof(obj, vm));
+        var acc: Data = undefined;
+        var got: bool = false;
+        var v: Data = undefined;
+        var idx: Data = undefined;
+        while (try pullStep(vm, st_id, &v, &idx)) {
+            if (!got) {
+                acc = v;
+                got = true;
+            } else {
+                acc = try vm.callFunctionParts(Data.new.function(@intFromEnum(f)), null, &[_]Data{ acc, v }, null);
+            }
+        }
+        if (!got) return .data(revo.Data.new.core(.nil));
+        return .data(acc);
+    }
+
+    pub fn sum(vm: *VM, obj: Ts.any) !HostResult {
+        const st_id = toState(vm, obj) catch
+            return .errType(0, "iterable", typeof(obj, vm));
+        var total: f64 = 0;
+        var v: Data = undefined;
+        var idx: Data = undefined;
+        while (try pullStep(vm, st_id, &v, &idx)) {
+            if (v.asNum()) |n| total += n;
+        }
+        return .data(Data.new.num(total));
+    }
 };
+
+pub const impls: []const api.Impl = root.impls(Impl).val ++ &[_]api.Impl{
+    .{ .name = "to_iter", .f = root.define(&.{.any}, to_iter_fn) },
+    .{ .name = "range", .f = root.defineVariadic(&.{.any}, range_fn) },
+    .{ .name = "map", .f = root.define(&.{ .any, .function }, transformFn(.map)) },
+    .{ .name = "filter", .f = root.define(&.{ .any, .function }, transformFn(.filter)) },
+    .{ .name = "take", .f = root.define(&.{ .any, .any }, boundedFn(.take)) },
+    .{ .name = "drop", .f = root.define(&.{ .any, .any }, boundedFn(.drop)) },
+    .{ .name = "zip", .f = root.defineVariadic(&.{.any}, zip_fn) },
+    .{ .name = "chunk", .f = root.define(&.{ .any, .any }, boundedFn(.chunk)) },
+    .{ .name = "flat_map", .f = root.define(&.{ .any, .function }, transformFn(.flat_map)) },
+    .{ .name = "count", .f = root.defineVariadic(&.{.any}, count_fn) },
+};
+
+fn to_iter_fn(args: []const Data, vm: *VM) !HostResult {
+    const w = (try wrapIterable(vm, args[0])) orelse
+        return .errType(0, "iterable", typeof(args[0], vm));
+    if (w.isString() or w.isTuple() or w.isTable())
+        return makeSeqIterator(vm, w);
+    return .data(w);
+}
 
 const Kind = enum(usize) {
     seq,
@@ -40,18 +167,6 @@ const Kind = enum(usize) {
     range,
 };
 
-/// > to_iter(obj: any) -> function
-/// returns a zero-arg callable iterator for obj
-pub fn to_iter(args: []const Data, vm: *VM) !HostResult {
-    const w = (try wrapIterable(vm, args[0])) orelse
-        return .errType(0, "iterable", typeof(args[0], vm));
-    if (w.isString() or w.isTuple() or w.isTable())
-        return makeSeqIterator(vm, w);
-    return .okData(w);
-}
-
-/// > range(...) -> function
-/// returns a lazy arithmetic sequence
 pub fn range_fn(args: []const Data, vm: *VM) !HostResult {
     const start: f64 = if (args.len == 1) 0 else blk: {
         const n = args[0].asNum() orelse return .errType(0, "num", typeof(args[0], vm));
@@ -74,10 +189,9 @@ pub fn range_fn(args: []const Data, vm: *VM) !HostResult {
     try putState(vm, it_id, .a, Data.new.num(start));
     try putState(vm, it_id, .b, Data.new.num(end));
     try putState(vm, it_id, .step, Data.new.num(step));
-    return .okData(Data.new.table(it_id));
+    return .data(Data.new.table(it_id));
 }
 
-/// Host for map/filter/flat_map-style lazy transform iterators
 fn transformFn(comptime kind: Kind) root.HostFn {
     return struct {
         fn f(args: []const Data, vm: *VM) anyerror!HostResult {
@@ -86,12 +200,11 @@ fn transformFn(comptime kind: Kind) root.HostFn {
             const it_id = try makeIterator(vm, kind);
             try putState(vm, it_id, .up, up);
             try putState(vm, it_id, .func, args[1]);
-            return .okData(Data.new.table(it_id));
+            return .data(Data.new.table(it_id));
         }
     }.f;
 }
 
-/// Host for take/drop/chunk-style bounded lazy iterators
 fn boundedFn(comptime kind: Kind) root.HostFn {
     return struct {
         fn f(args: []const Data, vm: *VM) anyerror!HostResult {
@@ -101,13 +214,11 @@ fn boundedFn(comptime kind: Kind) root.HostFn {
             const it_id = try makeIterator(vm, kind);
             try putState(vm, it_id, .up, up);
             try putState(vm, it_id, .n, Data.new.num(n));
-            return .okData(Data.new.table(it_id));
+            return .data(Data.new.table(it_id));
         }
     }.f;
 }
 
-/// > zip(...) -> function
-/// returns a lazy iterator of tuples, one element from each iterable
 pub fn zip_fn(args: []const Data, vm: *VM) !HostResult {
     if (args.len < 2) return .errArity(args.len, 2);
     var ups = try std.ArrayList(Data).initCapacity(vm.runtime.alloc, args.len);
@@ -120,156 +231,9 @@ pub fn zip_fn(args: []const Data, vm: *VM) !HostResult {
     const up_tuple = try vm.tuples.create(ups.items);
     const it_id = try makeIterator(vm, .zip);
     try putState(vm, it_id, .up, Data.new.tuple(up_tuple));
-    return .okData(Data.new.table(it_id));
+    return .data(Data.new.table(it_id));
 }
 
-/// > enumerate(collection: any) -> function
-/// returns a lazy iterator of (index, value) tuples
-pub fn enumerate_fn(args: []const Data, vm: *VM) !HostResult {
-    const up = (try wrapIterable(vm, args[0])) orelse
-        return .errType(0, "iterable", typeof(args[0], vm));
-    const it_id = try makeIterator(vm, .enumerate);
-    try putState(vm, it_id, .up, up);
-    return .okData(Data.new.table(it_id));
-}
-
-/// > collect(iterable: any) -> table
-/// collects all values from an iterable into a table
-pub fn collect_fn(args: []const Data, vm: *VM) !HostResult {
-    if (args.len != 1) return .errArity(args.len, 1);
-    const st_id = toState(vm, args[0]) catch
-        return .errType(0, "iterable", typeof(args[0], vm));
-    const out_id = try vm.tables.create();
-    var v: Data = undefined;
-    var idx: Data = undefined;
-    while (try pullStep(vm, st_id, &v, &idx))
-        try (try vm.tables.get(out_id)).array.append(vm.runtime.alloc, v);
-    return .okData(Data.new.table(out_id));
-}
-
-/// > collect_string(iterable: any) -> string
-/// collects string/num elements from an iterable into a string
-pub fn collect_string_fn(args: []const Data, vm: *VM) !HostResult {
-    if (args.len != 1) return .errArity(args.len, 1);
-    const st_id = toState(vm, args[0]) catch
-        return .errType(0, "iterable", typeof(args[0], vm));
-    var buf = try std.ArrayList(u8).initCapacity(vm.runtime.alloc, 0);
-    defer buf.deinit(vm.runtime.alloc);
-    var v: Data = undefined;
-    var idx: Data = undefined;
-    while (try pullStep(vm, st_id, &v, &idx)) {
-        if (v.asString()) |s| {
-            try buf.appendSlice(vm.runtime.alloc, vm.stringValue(s));
-        } else if (v.asNum()) |n| {
-            try buf.append(vm.runtime.alloc, @as(u8, @intFromFloat(std.math.clamp(@round(n), 0, 255))));
-        } else {
-            return .errType(0, "string or num", typeof(v, vm));
-        }
-    }
-    return .{ .ok = try vm.adoptDataString(try buf.toOwnedSlice(vm.runtime.alloc)) };
-}
-
-/// > reduce(collection: any, fn: function, init: any) -> any
-/// folds/accumulates elements using function and initial value
-pub fn reduce_fn(args: []const Data, vm: *VM) !HostResult {
-    if (args.len != 3) return .errArity(args.len, 3);
-    const st_id = toState(vm, args[0]) catch
-        return .errType(0, "iterable", typeof(args[0], vm));
-    var acc = args[2];
-    var v: Data = undefined;
-    var idx: Data = undefined;
-    while (try pullStep(vm, st_id, &v, &idx))
-        acc = try vm.callFunctionParts(args[1], null, &[_]Data{ acc, v }, null);
-    return .{ .ok = acc };
-}
-
-/// > fold(collection: any, fn: function) -> any
-/// like reduce but without an initial value; first element seeds the fold
-pub fn fold_fn(args: []const Data, vm: *VM) !HostResult {
-    if (args.len != 2) return .errArity(args.len, 2);
-    const st_id = toState(vm, args[0]) catch
-        return .errType(0, "iterable", typeof(args[0], vm));
-    var acc: Data = undefined;
-    var got: bool = false;
-    var v: Data = undefined;
-    var idx: Data = undefined;
-    while (try pullStep(vm, st_id, &v, &idx)) {
-        if (!got) {
-            acc = v;
-            got = true;
-        } else {
-            acc = try vm.callFunctionParts(args[1], null, &[_]Data{ acc, v }, null);
-        }
-    }
-    if (!got) return .okData(revo.Data.new.core(.nil));
-    return .{ .ok = acc };
-}
-
-/// call fn with (value, index) when it takes 2+ params, else (value)
-fn callPred(vm: *VM, f: Data, v: Data, idx: Data) !Data {
-    return if (passesIndex(vm, f))
-        try vm.callFunctionParts(f, null, &[_]Data{ v, idx }, null)
-    else
-        try vm.callFunctionParts(f, null, &[_]Data{v}, null);
-}
-
-/// > each(collection: any, fn: function) -> atom
-/// iterates over elements, calling function for side effects, returns :ok
-pub fn each_fn(args: []const Data, vm: *VM) !HostResult {
-    if (args.len != 2) return .errArity(args.len, 2);
-    const st_id = toState(vm, args[0]) catch
-        return .errType(0, "iterable", typeof(args[0], vm));
-    var v: Data = undefined;
-    var idx: Data = undefined;
-    while (try pullStep(vm, st_id, &v, &idx))
-        _ = try callPred(vm, args[1], v, idx);
-    return root.okAtom(vm);
-}
-
-/// > find(what: any, fn: function) -> any
-/// returns first element where function returns true, or nil
-pub fn find_fn(args: []const Data, vm: *VM) !HostResult {
-    if (args.len != 2) return .errArity(args.len, 2);
-    const st_id = toState(vm, args[0]) catch
-        return .errType(0, "iterable", typeof(args[0], vm));
-    var v: Data = undefined;
-    var idx: Data = undefined;
-    while (try pullStep(vm, st_id, &v, &idx)) {
-        if (isTruthy(try callPred(vm, args[1], v, idx))) return .{ .ok = v };
-    }
-    return .okData(revo.Data.new.core(.nil));
-}
-
-/// > all?(collection: any, pred: function) -> boolean
-/// returns true if function returns true for all elements
-pub fn all_fn(args: []const Data, vm: *VM) !HostResult {
-    if (args.len != 2) return .errArity(args.len, 2);
-    const st_id = toState(vm, args[0]) catch
-        return .errType(0, "iterable", typeof(args[0], vm));
-    var v: Data = undefined;
-    var idx: Data = undefined;
-    while (try pullStep(vm, st_id, &v, &idx)) {
-        if (!isTruthy(try callPred(vm, args[1], v, idx))) return .okData(Data.new.boolean(false));
-    }
-    return .okData(Data.new.boolean(true));
-}
-
-/// > any?(collection: any, pred: function) -> boolean
-/// returns true if function returns true for any element
-pub fn any_fn(args: []const Data, vm: *VM) !HostResult {
-    if (args.len != 2) return .errArity(args.len, 2);
-    const st_id = toState(vm, args[0]) catch
-        return .errType(0, "iterable", typeof(args[0], vm));
-    var v: Data = undefined;
-    var idx: Data = undefined;
-    while (try pullStep(vm, st_id, &v, &idx)) {
-        if (isTruthy(try callPred(vm, args[1], v, idx))) return .okData(Data.new.boolean(true));
-    }
-    return .okData(Data.new.boolean(false));
-}
-
-/// > count(collection: any, pred: function) -> num
-/// returns the num of elements, or of those where pred is truthy
 pub fn count_fn(args: []const Data, vm: *VM) !HostResult {
     if (args.len < 1 or args.len > 2) return .errArity(args.len, 1);
     const st_id = toState(vm, args[0]) catch
@@ -281,32 +245,15 @@ pub fn count_fn(args: []const Data, vm: *VM) !HostResult {
         if (args.len == 2 and !isTruthy(try callPred(vm, args[1], v, idx))) continue;
         n += 1;
     }
-    return .okData(Data.new.num(n));
+    return .data(Data.new.num(n));
 }
 
-/// > sum(collection: any) -> num
-/// sums numeric elements, skipping non-numbers
-pub fn sum_fn(args: []const Data, vm: *VM) !HostResult {
-    if (args.len != 1) return .errArity(args.len, 1);
-    const st_id = toState(vm, args[0]) catch
-        return .errType(0, "iterable", typeof(args[0], vm));
-    var total: f64 = 0;
-    var v: Data = undefined;
-    var idx: Data = undefined;
-    while (try pullStep(vm, st_id, &v, &idx)) {
-        if (v.asNum()) |n| total += n;
-    }
-    return .okData(Data.new.num(total));
-}
-
-/// __call handler for iterator tables
-/// reads the kind from the table and advances the matching state machine
 fn iteratorNext(args: []const Data, vm: *VM) !HostResult {
     const table_id = args[0].asTable() orelse
-        return .okData(revo.Data.new.core(.done));
+        return .data(revo.Data.new.core(.done));
     const kind_val = (try vm.tables.get(table_id)).getRawAtom(revo.core_atoms.kind.atomId(), vm) orelse
-        return .okData(revo.Data.new.core(.done));
-    const kind_num = kind_val.asNum() orelse return .okData(revo.Data.new.core(.done));
+        return .data(revo.Data.new.core(.done));
+    const kind_num = kind_val.asNum() orelse return .data(revo.Data.new.core(.done));
     const kind: Kind = @enumFromInt(@as(usize, @intFromFloat(kind_num)));
     return switch (kind) {
         .seq => seqNext(table_id, vm),
@@ -325,27 +272,27 @@ fn iteratorNext(args: []const Data, vm: *VM) !HostResult {
 fn seqNext(st_id: mem.TableID, vm: *VM) !HostResult {
     var v: Data = undefined;
     var idx: Data = undefined;
-    if (!try pullStep(vm, st_id, &v, &idx)) return .okData(revo.Data.new.core(.done));
-    return .okData(v);
+    if (!try pullStep(vm, st_id, &v, &idx)) return .data(revo.Data.new.core(.done));
+    return .data(v);
 }
 
 fn mapNext(st_id: mem.TableID, vm: *VM) !HostResult {
     var v: Data = undefined;
     var idx: Data = undefined;
-    if (!try pullStep(vm, st_id, &v, &idx)) return .okData(revo.Data.new.core(.done));
+    if (!try pullStep(vm, st_id, &v, &idx)) return .data(revo.Data.new.core(.done));
     const f = (try vm.tables.get(st_id)).getRawAtom(revo.core_atoms.func.atomId(), vm) orelse
-        return .okData(revo.Data.new.core(.done));
-    return .okData(try callPred(vm, f, v, idx));
+        return .data(revo.Data.new.core(.done));
+    return .data(try callPred(vm, f, v, idx));
 }
 
 fn filterNext(st_id: mem.TableID, vm: *VM) !HostResult {
     const f = (try vm.tables.get(st_id)).getRawAtom(revo.core_atoms.func.atomId(), vm) orelse
-        return .okData(revo.Data.new.core(.done));
+        return .data(revo.Data.new.core(.done));
     while (true) {
         var v: Data = undefined;
         var idx: Data = undefined;
-        if (!try pullStep(vm, st_id, &v, &idx)) return .okData(revo.Data.new.core(.done));
-        if (isTruthy(try callPred(vm, f, v, idx))) return .okData(v);
+        if (!try pullStep(vm, st_id, &v, &idx)) return .data(revo.Data.new.core(.done));
+        if (isTruthy(try callPred(vm, f, v, idx))) return .data(v);
     }
 }
 
@@ -353,24 +300,24 @@ fn takeNext(st_id: mem.TableID, vm: *VM) !HostResult {
     var st = try vm.tables.get(st_id);
     const n = (st.getRawAtom(revo.core_atoms.n.atomId(), vm) orelse Data.new.num(0)).asNum().?;
     const taken = (st.getRawAtom(revo.core_atoms.count.atomId(), vm) orelse Data.new.num(0)).asNum().?;
-    if (taken >= n) return .okData(revo.Data.new.core(.done));
+    if (taken >= n) return .data(revo.Data.new.core(.done));
     var v: Data = undefined;
     var idx: Data = undefined;
-    if (!try pullStep(vm, st_id, &v, &idx)) return .okData(revo.Data.new.core(.done));
+    if (!try pullStep(vm, st_id, &v, &idx)) return .data(revo.Data.new.core(.done));
     st = try vm.tables.get(st_id);
     try st.putRawAtom(revo.core_atoms.count.atomId(), Data.new.num(taken + 1), vm);
-    return .okData(v);
+    return .data(v);
 }
 
 fn dropNext(st_id: mem.TableID, vm: *VM) !HostResult {
     while (true) {
         var v: Data = undefined;
         var idx: Data = undefined;
-        if (!try pullStep(vm, st_id, &v, &idx)) return .okData(revo.Data.new.core(.done));
+        if (!try pullStep(vm, st_id, &v, &idx)) return .data(revo.Data.new.core(.done));
         var st = try vm.tables.get(st_id);
         const n = (st.getRawAtom(revo.core_atoms.n.atomId(), vm) orelse Data.new.num(0)).asNum().?;
         const dropped = (st.getRawAtom(revo.core_atoms.count.atomId(), vm) orelse Data.new.num(0)).asNum().?;
-        if (dropped >= n) return .okData(v);
+        if (dropped >= n) return .data(v);
         try st.putRawAtom(revo.core_atoms.count.atomId(), Data.new.num(dropped + 1), vm);
     }
 }
@@ -378,16 +325,16 @@ fn dropNext(st_id: mem.TableID, vm: *VM) !HostResult {
 fn enumerateNext(st_id: mem.TableID, vm: *VM) !HostResult {
     var v: Data = undefined;
     var idx: Data = undefined;
-    if (!try pullStep(vm, st_id, &v, &idx)) return .okData(revo.Data.new.core(.done));
+    if (!try pullStep(vm, st_id, &v, &idx)) return .data(revo.Data.new.core(.done));
     const pair = try vm.tuples.create(&[_]Data{ idx, v });
-    return .okData(Data.new.tuple(pair));
+    return .data(Data.new.tuple(pair));
 }
 
 fn chunkNext(st_id: mem.TableID, vm: *VM) !HostResult {
     const n_val = (try vm.tables.get(st_id)).getRawAtom(revo.core_atoms.n.atomId(), vm) orelse
-        return .okData(revo.Data.new.core(.done));
+        return .data(revo.Data.new.core(.done));
     const n = root.numToInt(usize, n_val.asNum().?) orelse
-        return .okData(revo.Data.new.core(.done));
+        return .data(revo.Data.new.core(.done));
     const out_id = try vm.tables.create();
     var count: usize = 0;
     while (count < n) {
@@ -397,26 +344,26 @@ fn chunkNext(st_id: mem.TableID, vm: *VM) !HostResult {
         try (try vm.tables.get(out_id)).array.append(vm.runtime.alloc, v);
         count += 1;
     }
-    if (count == 0) return .okData(revo.Data.new.core(.done));
-    return .okData(Data.new.table(out_id));
+    if (count == 0) return .data(revo.Data.new.core(.done));
+    return .data(Data.new.table(out_id));
 }
 
 fn zipNext(st_id: mem.TableID, vm: *VM) !HostResult {
     const ups_data = (try vm.tables.get(st_id)).getRawAtom(revo.core_atoms.up.atomId(), vm) orelse
-        return .okData(revo.Data.new.core(.done));
-    const ups_id = ups_data.asTuple() orelse return .okData(revo.Data.new.core(.done));
+        return .data(revo.Data.new.core(.done));
+    const ups_id = ups_data.asTuple() orelse return .data(revo.Data.new.core(.done));
     var vals = try std.ArrayList(Data).initCapacity(vm.runtime.alloc, 0);
     defer vals.deinit(vm.runtime.alloc);
     var i: usize = 0;
     while (true) : (i += 1) {
-        const ups = vm.tuples.get(ups_id) catch return .okData(revo.Data.new.core(.done));
+        const ups = vm.tuples.get(ups_id) catch return .data(revo.Data.new.core(.done));
         if (i >= ups.items.len) break;
         const v = try vm.callFunctionParts(ups.items[i], null, &.{}, null);
-        if (isDone(v)) return .okData(revo.Data.new.core(.done));
+        if (isDone(v)) return .data(revo.Data.new.core(.done));
         try vals.append(vm.runtime.alloc, v);
     }
     const t = try vm.tuples.create(vals.items);
-    return .okData(Data.new.tuple(t));
+    return .data(Data.new.tuple(t));
 }
 
 fn flatMapNext(st_id: mem.TableID, vm: *VM) !HostResult {
@@ -427,9 +374,9 @@ fn flatMapNext(st_id: mem.TableID, vm: *VM) !HostResult {
             if (a == revo.core_atoms.atomId(.nil)) {
                 var v: Data = undefined;
                 var idx: Data = undefined;
-                if (!try pullStep(vm, st_id, &v, &idx)) return .okData(revo.Data.new.core(.done));
+                if (!try pullStep(vm, st_id, &v, &idx)) return .data(revo.Data.new.core(.done));
                 const f = (try vm.tables.get(st_id)).getRawAtom(revo.core_atoms.func.atomId(), vm) orelse
-                    return .okData(revo.Data.new.core(.done));
+                    return .data(revo.Data.new.core(.done));
                 const mapped = try callPred(vm, f, v, idx);
                 const sub = (try toCallable(vm, mapped)) orelse
                     return .errType(1, "iterable", typeof(mapped, vm));
@@ -444,7 +391,7 @@ fn flatMapNext(st_id: mem.TableID, vm: *VM) !HostResult {
             try st.putRawAtom(revo.core_atoms.cur.atomId(), revo.Data.new.core(.nil), vm);
             continue;
         }
-        return .okData(val);
+        return .data(val);
     }
 }
 
@@ -455,17 +402,12 @@ fn rangeNext(st_id: mem.TableID, vm: *VM) !HostResult {
     const step = (st.getRawAtom(revo.core_atoms.step.atomId(), vm) orelse Data.new.num(1)).asNum().?;
     const cur = (st.getRawAtom(revo.core_atoms.pos.atomId(), vm) orelse Data.new.num(a)).asNum().?;
     if ((step > 0 and cur >= b) or (step < 0 and cur <= b))
-        return .okData(revo.Data.new.core(.done));
+        return .data(revo.Data.new.core(.done));
     st = try vm.tables.get(st_id);
     try st.putRawAtom(revo.core_atoms.pos.atomId(), Data.new.num(cur + step), vm);
-    return .okData(Data.new.num(cur));
+    return .data(Data.new.num(cur));
 }
 
-/// resolves obj to an iterable:
-/// functions and callable tables are iterators already
-/// __iter metamethods are called
-/// raw string/tuple/table pass through so index/key callbacks keep keys
-/// returns null for non-iterables
 fn wrapIterable(vm: *VM, obj: Data) !?Data {
     if (obj.isFunction()) return obj;
     if (try vm.getMetamethodByAtom(obj, revo.core_atoms.__iter.atomId())) |mm|
@@ -476,8 +418,6 @@ fn wrapIterable(vm: *VM, obj: Data) !?Data {
     return null;
 }
 
-/// resolves obj to a zero-arg callable iterator:
-/// functions and callable tables return as-is, raw sequences get a seq wrapper
 fn toCallable(vm: *VM, obj: Data) !?Data {
     const w = (try wrapIterable(vm, obj)) orelse return null;
     if (w.isFunction()) return w;
@@ -488,7 +428,6 @@ fn toCallable(vm: *VM, obj: Data) !?Data {
     return Data.new.table(it_id);
 }
 
-/// makes a state table (metatable-less) for terminal-op iteration
 fn toState(vm: *VM, xs: Data) !mem.TableID {
     const w = (try wrapIterable(vm, xs)) orelse
         return error.NotIterable;
@@ -508,10 +447,9 @@ fn makeState(vm: *VM, obj: Data) !mem.TableID {
 fn makeSeqIterator(vm: *VM, obj: Data) !HostResult {
     const it_id = try makeIterator(vm, .seq);
     try putState(vm, it_id, .up, obj);
-    return .okData(Data.new.table(it_id));
+    return .data(Data.new.table(it_id));
 }
 
-/// creates an iterator table with state and __call stored directly in the table
 fn makeIterator(vm: *VM, kind: Kind) !mem.TableID {
     const it_id = try vm.tables.create();
     const it = try vm.tables.get(it_id);
@@ -522,8 +460,6 @@ fn makeIterator(vm: *VM, kind: Kind) !mem.TableID {
         .func = iteratorNext,
     });
     try it.putRawAtom(revo.core_atoms.__call.atomId(), Data.new.function(next_id), vm);
-    //
-    // set tihs module as metatable for method chaining
     if (vm.stdlib_globals.get(try vm.internAtom("iter"))) |iter_val| {
         if (iter_val.asTable()) |iter_tid| {
             try vm.setTableMetatable(it_id, iter_tid);
@@ -536,8 +472,6 @@ fn putState(vm: *VM, it_id: mem.TableID, comptime k: revo.core_atoms, val: Data)
     try (try vm.tables.get(it_id)).putRawAtom(k.atomId(), val, vm);
 }
 
-/// advances the state machine one element; out_idx is the index (or key for
-/// hash-phase table iteration) of the element; returns false at :done
 fn pullStep(vm: *VM, st_id: mem.TableID, out: *Data, out_idx: *Data) !bool {
     var st = try vm.tables.get(st_id);
     const up = st.getRawAtom(revo.core_atoms.up.atomId(), vm) orelse return false;
@@ -594,7 +528,6 @@ fn pullStep(vm: *VM, st_id: mem.TableID, out: *Data, out_idx: *Data) !bool {
         }
         if (up.tag() != .table) return false;
 
-        // array part exhausted: snapshot hash entries in insertion order
         const table_id = up.asTable().?;
         var entries = try std.ArrayList(Data).initCapacity(vm.runtime.alloc, 0);
         defer entries.deinit(vm.runtime.alloc);
@@ -631,7 +564,13 @@ fn pullStep(vm: *VM, st_id: mem.TableID, out: *Data, out_idx: *Data) !bool {
     return false;
 }
 
-/// true when the function is declared with 2+ params (value + index/key)
+fn callPred(vm: *VM, f: Data, v: Data, idx: Data) !Data {
+    return if (passesIndex(vm, f))
+        try vm.callFunctionParts(f, null, &[_]Data{ v, idx }, null)
+    else
+        try vm.callFunctionParts(f, null, &[_]Data{v}, null);
+}
+
 fn passesIndex(vm: *VM, f: Data) bool {
     const fn_id = f.asFunction() orelse return false;
     const func = vm.functions.get(fn_id) catch return false;
@@ -646,18 +585,6 @@ inline fn isDone(data: Data) bool {
 inline fn isTruthy(data: Data) bool {
     return !revo.isFalse(data);
 }
-
-const std = @import("std");
-
-const revo = @import("../root.zig");
-const Data = revo.Data;
-const VM = revo.VM;
-const api = @import("api.zig");
-const root = @import("root.zig");
-const mem = revo.memory;
-const HostResult = root.HostResult;
-const typeof = root.typeof;
-const testing = revo.lang.testing;
 
 test "iter functions" {
     try testing.topString(
@@ -864,7 +791,6 @@ test "iter index callbacks and state hiding" {
 }
 
 test "iter Host closures can allocate tables without corrupting pools" {
-    // pool grew underneath them, corrupting the iterated table
     try testing.topNumber(
         \\ const xs = {}
         \\ xs:push("abc")
@@ -919,3 +845,15 @@ test "iter method chaining" {
         \\   |> iter.sum()
     , 15);
 }
+
+const std = @import("std");
+
+const revo = @import("../root.zig");
+const Data = revo.Data;
+const VM = revo.VM;
+const api = @import("api.zig");
+const root = @import("root.zig");
+const mem = revo.memory;
+const HostResult = root.HostResult;
+const typeof = root.typeof;
+const testing = revo.lang.testing;

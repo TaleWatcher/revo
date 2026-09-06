@@ -3,6 +3,7 @@ const revo = @import("../root.zig");
 const root = @import("root.zig");
 const api = @import("api.zig");
 
+const Ts = root.T;
 const Data = revo.Data;
 const testing = revo.lang.testing;
 const VM = revo.VM;
@@ -11,46 +12,44 @@ const Uri = std.Uri;
 const Component = std.Uri.Component;
 const Table = revo.table.Table;
 
-pub const impls: []const api.Impl = &.{
-    .{ .name = "decode", .f = root.define(&.{.any}, decode) },
-    .{ .name = "encode", .f = root.define(&.{.any}, encode) },
+pub const Impl = struct {
+    pub fn decode(vm: *VM, self: Ts.any) !HostResult {
+        const source = vm.stringValue(self.asString().?);
+        const uri = try std.Uri.parse(source);
+        const root_id = try vm.tables.create();
+
+        try parseScheme(&uri, root_id, vm);
+        try parseComponent(uri.host, "host", root_id, vm);
+        try parseComponent(uri.fragment, "fragment", root_id, vm);
+        try parseComponent(uri.user, "user", root_id, vm);
+        try parseComponent(uri.path, "path", root_id, vm);
+        try parseQuery(&uri, root_id, vm);
+        try parsePort(&uri, root_id, vm);
+
+        return .data(Data.new.table(root_id));
+    }
+
+    pub fn encode(vm: *VM, self: Ts.table) !HostResult {
+        var out = std.Io.Writer.Allocating.init(vm.runtime.alloc);
+        defer out.deinit();
+        const table = try vm.tables.get(@intFromEnum(self));
+
+        try writePart(table, "scheme", null, ":", &out.writer, vm);
+        try writeAuthority(table, &out.writer, vm);
+        try writePart(table, "user", null, "@", &out.writer, vm);
+        try writePart(table, "host", null, null, &out.writer, vm);
+        try writePort(table, &out.writer, vm);
+        try writePart(table, "path", null, null, &out.writer, vm);
+        try writeQuery(table, &out.writer, vm);
+        try writePart(table, "fragment", "#", null, &out.writer, vm);
+
+        const slice = try out.toOwnedSlice();
+        const data = try vm.adoptDataString(slice);
+        return HostResult.Ok(vm, data);
+    }
 };
 
-fn decode(args: []const Data, vm: *VM) !HostResult {
-    const source = vm.stringValue(args[0].asString().?);
-    const uri = try std.Uri.parse(source);
-    const root_id = try vm.tables.create();
-
-    try parseScheme(&uri, root_id, vm);
-    try parseComponent(uri.host, "host", root_id, vm);
-    try parseComponent(uri.fragment, "fragment", root_id, vm);
-    try parseComponent(uri.user, "user", root_id, vm);
-    try parseComponent(uri.path, "path", root_id, vm);
-    try parseQuery(&uri, root_id, vm);
-    try parsePort(&uri, root_id, vm);
-
-    const data = Data.new.table(root_id);
-    return HostResult.okData(data);
-}
-
-fn encode(args: []const Data, vm: *VM) !HostResult {
-    var out = std.Io.Writer.Allocating.init(vm.runtime.alloc);
-    defer out.deinit();
-    const table = try vm.tables.get(args[0].asTable().?);
-
-    try writePart(table, "scheme", null, ":", &out.writer, vm);
-    try writeAuthority(table, &out.writer, vm);
-    try writePart(table, "user", null, "@", &out.writer, vm);
-    try writePart(table, "host", null, null, &out.writer, vm);
-    try writePort(table, &out.writer, vm);
-    try writePart(table, "path", null, null, &out.writer, vm);
-    try writeQuery(table, &out.writer, vm);
-    try writePart(table, "fragment", "#", null, &out.writer, vm);
-
-    const slice = try out.toOwnedSlice();
-    const data = try vm.adoptDataString(slice);
-    return root.resultTuple(vm, .ok, data);
-}
+pub const impls: []const api.Impl = root.impls(Impl).val;
 
 fn writePart(table: *Table, name: []const u8, prefix: ?[]const u8, postfix: ?[]const u8, w: *std.Io.Writer, vm: *VM) !void {
     const key = try vm.internAtom(name);

@@ -11,28 +11,78 @@ const testing = revo.lang.testing;
 
 pub const api = @import("api.zig");
 
-pub const root_impls: []const api.Impl = &.{
+pub const Impl = struct {
+    pub fn len(vm: *VM, val: T.any) !HostResult {
+        const mm = try vm.getMetamethodByAtom(val, revo.core_atoms.atomId(.__len));
+        if (mm) |m| return callUnaryMetamethod(m, val, vm);
+        return switch (val.tag()) {
+            .string => .data(Data.new.num(vm.stringValue(val.asString().?).len)),
+            .table => .data(Data.new.num((try vm.tables.get(val.asTable().?)).count())),
+            .tuple => .data(Data.new.num((try vm.tuples.get(val.asTuple().?)).items.len)),
+            else => .errType(1, "string, table, or tuple", @import("root.zig").typeof(val, vm)),
+        };
+    }
+
+    pub fn inspect(vm: *VM, val: T.any) !HostResult {
+        if (comptime !revo.is_freestanding)
+            _ = try print(&[_]Data{val}, vm);
+        return .data(val);
+    }
+
+    pub fn @"type"(vm: *VM, val: T.any) !HostResult {
+        if (val.asStructVal()) |instance_id| {
+            const instance = vm.struct_instances.get(instance_id) catch
+                return .data(Data.new.atom(try vm.internAtom("struct")));
+            return .data(Data.new.structType(instance.type_id));
+        }
+        return .data(Data.new.atom(try vm.internAtom(@import("root.zig").typeof(val, vm))));
+    }
+
+    pub fn typeof(vm: *VM, val: T.any) !HostResult {
+        return @"type"(vm, val);
+    }
+
+    pub fn expect(vm: *VM, val: T.any) !HostResult {
+        if (revo.isFalse(val)) return HostResult.Err(vm, "ExpectFailed");
+        return HostResult.Ok(vm, val);
+    }
+
+    pub fn expect_eq(vm: *VM, a: T.any, b: T.any) !HostResult {
+        if (vm.compare(a, b) != .eq) {
+            return HostResult.Err(vm, "NotEqual");
+        }
+        return HostResult.Ok(vm, a);
+    }
+
+    pub fn sleep(vm: *VM, ms: T.number) !HostResult {
+        const n: u64 = numToInt(u64, ms) orelse return .errType(0, "non-negative integer", @import("root.zig").typeof(Data.new.num(ms), vm));
+        try vm.schedParkCurrentForSleepMS(n);
+        return .parked();
+    }
+
+    pub fn gensym(vm: *VM) !HostResult {
+        const n = gensym_counter;
+        gensym_counter += 1;
+        const name = try std.fmt.allocPrint(vm.runtime.alloc, "__gensym_{d}", .{n});
+        defer vm.runtime.alloc.free(name);
+        return .data(try vm.ownDataStringNoDedup(name));
+    }
+};
+
+pub const root_impls: []const api.Impl = impls(Impl).val ++ &[_]api.Impl{
     .{ .name = "fmt", .f = defineVariadic(&[_]TypeSpec{.string}, fmt) },
-    .{ .name = "len", .f = define(&[_]TypeSpec{.any}, len_) },
-    .{ .name = "inspect", .f = define(&[_]TypeSpec{.any}, inspect) },
     .{ .name = "get_meta", .f = define(&[_]TypeSpec{.any}, meta.get_meta) },
     .{ .name = "set_meta", .f = define(&[_]TypeSpec{ .any, .any }, meta.set_meta) },
-    .{ .name = "type", .f = define(&[_]TypeSpec{.any}, typeof_) },
-    .{ .name = "typeof", .f = define(&[_]TypeSpec{.any}, typeof_) },
-    .{ .name = "expect", .f = define(&[_]TypeSpec{.any}, expect) },
-    .{ .name = "expect_eq", .f = define(&[_]TypeSpec{ .any, .any }, expect_eq) },
-    .{ .name = "assert", .f = define(&[_]TypeSpec{.any}, assert_) },
-    .{ .name = "assert_eq", .f = define(&[_]TypeSpec{ .any, .any }, assert_eq) },
     .{ .name = "set_debug", .f = define(&[_]TypeSpec{.table}, meta.set_debug) },
     .{ .name = "debug", .f = define(&[_]TypeSpec{}, debug_) },
     .{ .name = "unwrap", .f = define(&[_]TypeSpec{.tuple}, try_) },
     .{ .name = "chan", .f = defineVariadic(&[_]TypeSpec{}, chan_new) },
     .{ .name = "send", .f = define(&[_]TypeSpec{ .tuple, .any }, chan_send) },
     .{ .name = "recv", .f = define(&[_]TypeSpec{.tuple}, chan_recv) },
-    .{ .name = "sleep", .f = define(&[_]TypeSpec{.number}, sleep) },
+    .{ .name = "assert", .f = define(&[_]TypeSpec{.any}, assert_) },
+    .{ .name = "assert_eq", .f = define(&[_]TypeSpec{ .any, .any }, assert_eq) },
     .{ .name = "panic", .f = defineVariadic(&[_]TypeSpec{}, panic_) },
     .{ .name = "print", .f = defineVariadic(&[_]TypeSpec{}, print) },
-    .{ .name = "gensym", .f = define(&[_]TypeSpec{}, gensym) },
 };
 
 pub const os_impls: []const api.Impl = &.{
@@ -139,12 +189,12 @@ pub fn ArgsTuple(comptime specs: []const TypeSpec) type {
 
 pub fn specToType(comptime spec: TypeSpec) type {
     return switch (spec) {
-        .number => f64,
-        .string => mem.StringID,
-        .atom => mem.AtomID,
-        .function => mem.FunctionID,
-        .table => mem.TableID,
-        .tuple => mem.TupleID,
+        .number => T.number,
+        .string => T.string,
+        .atom => T.atom,
+        .function => T.function,
+        .table => T.table,
+        .tuple => T.tuple,
         .bool => mem.AtomID,
         .any => Data,
     };
@@ -165,18 +215,6 @@ pub fn unwrapArgs(comptime specs: []const TypeSpec, args: []const Data) ArgsTupl
         };
     }
     return result;
-}
-
-/// shorthand for auto unwrapping args. usually for anonymous functions
-pub fn def(
-    comptime specs: []const TypeSpec,
-    comptime impl: fn (args: ArgsTuple(specs), vm: *VM) anyerror!HostResult,
-) HostFunc {
-    return define(specs, struct {
-        fn call(raw: []const Data, vm: *VM) anyerror!HostResult {
-            return impl(unwrapArgs(specs, raw), vm);
-        }
-    }.call);
 }
 
 pub const ResultTag = enum { ok, err };
@@ -235,21 +273,16 @@ fn isBoolAtom(atom: mem.AtomID) bool {
 /// finite integral num representable in T
 pub const numToInt = revo.vm.memory.numToInt;
 
-pub fn resultTuple(vm: *VM, comptime tag: ResultTag, value: Data) !HostResult {
+fn makeResultTuple(vm: *VM, comptime tag: ResultTag, value: Data) !HostResult {
     const tag_atom = try resultTag(vm, tag);
     const items = [_]Data{
         Data.new.atom(tag_atom),
         value,
     };
-    return .okData(Data.new.tuple(try vm.tuples.create(&items)));
+    return .data(Data.new.tuple(try vm.tuples.create(&items)));
 }
 
-pub fn okAtom(vm: *VM) HostResult {
-    _ = vm;
-    return .{ .ok = revo.Data.new.core(.ok) };
-}
-
-pub fn resultTag(vm: *VM, comptime tag: ResultTag) !mem.AtomID {
+fn resultTag(vm: *VM, comptime tag: ResultTag) !mem.AtomID {
     _ = vm;
     return switch (tag) {
         .ok => revo.core_atoms.atomId(.ok),
@@ -318,7 +351,7 @@ pub fn fmt(args: []const Data, vm: *VM) !HostResult {
     }
 
     const str = try result.toOwnedSlice();
-    return .{ .ok = try vm.adoptDataString(str) };
+    return .data(try vm.adoptDataString(str));
 }
 
 test "fmt %v formats plain" {
@@ -372,19 +405,19 @@ pub fn dotest(args: []const Data, vm: *VM) !HostResult {
         const failure = vm.evalFailure(err);
         failure.render(vm.runtime.alloc, &w.interface, vm.currentDebugSource() orelse "") catch {
             try revo.pretty.printError(&w.interface, "hard-fail - {s}", .{@errorName(err)});
-            return .{ .ok = Data.new.nil() };
+            return .data(Data.new.nil());
         };
-        return .{ .ok = Data.new.nil() };
+        return .data(Data.new.nil());
     };
     // only react to err tuple
     // everything else is pass
     if (res.asTuple()) |tid| {
         const tpl = try vm.tuples.get(tid);
         if (tpl.items.len != 2)
-            return .{ .ok = Data.new.nil() };
-        const tag = tpl.items[0].asAtom() orelse return .{ .ok = Data.new.nil() };
+            return .data(Data.new.nil());
+        const tag = tpl.items[0].asAtom() orelse return .data(Data.new.nil());
         if (tag != revo.core_atoms.atomId(.err))
-            return .{ .ok = Data.new.nil() };
+            return .data(Data.new.nil());
 
         var obuf = std.Io.Writer.Allocating.init(vm.runtime.alloc);
         defer obuf.deinit();
@@ -392,7 +425,7 @@ pub fn dotest(args: []const Data, vm: *VM) !HostResult {
 
         try revo.pretty.printError(&w.interface, "fail - {s}", .{obuf.written()});
     }
-    return .{ .ok = Data.new.nil() };
+    return .data(Data.new.nil());
 }
 
 /// internal, pls dont use. runs a test suite
@@ -407,12 +440,12 @@ pub fn dosuite(args: []const Data, vm: *VM) !HostResult {
         defer buf.deinit();
         failure.render(vm.runtime.alloc, &buf.writer, vm.currentDebugSource() orelse "") catch {
             sw.interface.print("* suite hard-failed: \"{s}\"\n", .{@errorName(err)}) catch {};
-            return .okCa(.nil);
+            return .coreAtom(.nil);
         };
         sw.interface.print("{s}\n", .{buf.written()}) catch {};
     };
 
-    return .okCa(.nil);
+    return .coreAtom(.nil);
 }
 
 pub fn debug_(args: []const Data, vm: *VM) !HostResult {
@@ -462,7 +495,7 @@ pub fn debug_(args: []const Data, vm: *VM) !HostResult {
         vm,
     );
 
-    return .okData(Data.new.table(out_id));
+    return .data(Data.new.table(out_id));
 }
 
 /// > len(arg0: any) -> num|nil
@@ -473,9 +506,9 @@ pub fn len_(args: []const Data, vm: *VM) !HostResult {
     const mm = try vm.getMetamethodByAtom(args[0], revo.core_atoms.atomId(.__len));
     if (mm) |m| return callUnaryMetamethod(m, args[0], vm);
     return switch (args[0].tag()) {
-        .string => .okData(Data.new.num(vm.stringValue(args[0].asString().?).len)),
-        .table => .okData(Data.new.num((try vm.tables.get(args[0].asTable().?)).count())),
-        .tuple => .okData(Data.new.num((try vm.tuples.get(args[0].asTuple().?)).items.len)),
+        .string => .data(Data.new.num(vm.stringValue(args[0].asString().?).len)),
+        .table => .data(Data.new.num((try vm.tables.get(args[0].asTable().?)).count())),
+        .tuple => .data(Data.new.num((try vm.tuples.get(args[0].asTuple().?)).items.len)),
         else => .errType(1, "string, table, or tuple", typeof(args[0], vm)),
     };
 }
@@ -485,7 +518,7 @@ pub fn len_(args: []const Data, vm: *VM) !HostResult {
 pub fn inspect(args: []const Data, vm: *VM) !HostResult {
     if (comptime !revo.is_freestanding)
         _ = try print(args, vm);
-    return .okData(args[0]);
+    return .data(args[0]);
 }
 
 pub fn typeof(d: Data, vm: *VM) []const u8 {
@@ -509,10 +542,10 @@ pub fn typeof(d: Data, vm: *VM) []const u8 {
 pub fn typeof_(args: []const Data, vm: *VM) !HostResult {
     if (args[0].asStructVal()) |instance_id| {
         const instance = vm.struct_instances.get(instance_id) catch
-            return .okData(Data.new.atom(try vm.internAtom("struct")));
-        return .okData(Data.new.structType(instance.type_id));
+            return .data(Data.new.atom(try vm.internAtom("struct")));
+        return .data(Data.new.structType(instance.type_id));
     }
-    return .okData(Data.new.atom(try vm.internAtom(typeof(args[0], vm))));
+    return .data(Data.new.atom(try vm.internAtom(typeof(args[0], vm))));
 }
 
 /// > string(arg0: any) -> string
@@ -525,7 +558,7 @@ pub fn string_(args: []const Data, vm: *VM) !HostResult {
     defer buf.deinit();
     try args[0].write(&buf.writer, vm, .display);
     const str = try buf.toOwnedSlice();
-    return .{ .ok = try vm.adoptDataString(str) };
+    return .data(try vm.adoptDataString(str));
 }
 
 /// > unwrap(result: tuple) -> any
@@ -538,7 +571,7 @@ pub fn try_(args: []const Data, vm: *VM) !HostResult {
     const atom = tag.asAtom() orelse return .errType(0, "tuple starting with atom", "tuple starting with non-atom");
     const ok_id = revo.core_atoms.atomId(.ok);
     if (atom != ok_id) return panic_(&[1]Data{tuple.items[1]}, vm);
-    return .{ .ok = tuple.items[1] };
+    return .data(tuple.items[1]);
 }
 
 /// > tuple:unwrap_err() -> any
@@ -554,7 +587,7 @@ pub fn unwrap_err_(args: []const Data, vm: *VM) !HostResult {
 
     const err_tag = revo.core_atoms.atomId(.err);
     if (tag.asAtom().? == err_tag) {
-        return .{ .ok = tuple.items[1] };
+        return .data(tuple.items[1]);
     }
 
     return panic_(&[1]Data{revo.Data.new.core(.err)}, vm);
@@ -583,7 +616,7 @@ pub fn chan_new(args: []const Data, vm: *VM) !HostResult {
         Data.new.atom(revo.core_atoms.chan.atomId()),
         Data.new.num(channel_id),
     });
-    return .okData(Data.new.tuple(res));
+    return .data(Data.new.tuple(res));
 }
 
 /// validate `args[0]` as a `:chan, id` tuple and extract the channel id
@@ -595,7 +628,7 @@ fn chanIdOf(args: []const Data, vm: *VM) HostResult {
     if (t.items[0].asAtom() != chan_atom)
         return .errType(0, "chan tuple", "tuple");
     const chan_id = t.items[1].asNum() orelse return .errType(0, "chan tuple", "tuple");
-    return .okData(Data.new.num(@as(revo.vm.ChannelID, @intFromFloat(chan_id))));
+    return .data(Data.new.num(@as(revo.vm.ChannelID, @intFromFloat(chan_id))));
 }
 
 /// > send(chan: tuple, value: any) -> atom
@@ -606,7 +639,7 @@ pub fn chan_send(args: []const Data, vm: *VM) !HostResult {
         else => |r| return r,
     };
     try vm.sched.channelSend(cid, args[1]);
-    return okAtom(vm);
+    return HostResult.coreAtom(.ok);
 }
 
 /// > recv(chan: tuple) -> any
@@ -617,7 +650,7 @@ pub fn chan_recv(args: []const Data, vm: *VM) !HostResult {
         else => |r| return r,
     };
     const recv_result = try vm.sched.channelRecv(cid);
-    if (recv_result) |value| return .{ .ok = value };
+    if (recv_result) |value| return .data(value);
     return .parked();
 }
 
@@ -625,10 +658,10 @@ pub fn chan_recv(args: []const Data, vm: *VM) !HostResult {
 /// accepts number (passthrough) or string (parsed)
 /// errors on other types
 pub fn number_(args: []const Data, vm: *VM) !HostResult {
-    if (args[0].isNumber()) return .Ok(vm, args[0]);
+    if (args[0].isNumber()) return HostResult.Ok(vm, args[0]);
     if (args[0].asString()) |id| {
         const parsed = try std.fmt.parseFloat(f64, vm.stringValue(id));
-        return .Ok(vm, Data.new.num(parsed));
+        return HostResult.Ok(vm, Data.new.num(parsed));
     }
     return .errType(0, "num, string", typeof(args[0], vm));
 }
@@ -638,24 +671,24 @@ pub fn number_(args: []const Data, vm: *VM) !HostResult {
 ///
 /// return the value back if truthy, otherwise (:err, :AssertionFailed)
 pub fn expect(args: []const Data, vm: *VM) !HostResult {
-    if (revo.isFalse(args[0])) return .Err(vm, "ExpectFailed");
-    return .Ok(vm, args[0]);
+    if (revo.isFalse(args[0])) return HostResult.Err(vm, "ExpectFailed");
+    return HostResult.Ok(vm, args[0]);
 }
 
 /// > expect_eq(what: any) -> !:ok
 /// panics if the value is falsy
 pub fn expect_eq(args: []const Data, vm: *VM) !HostResult {
     if (vm.compare(args[0], args[1]) != .eq) {
-        return .Err(vm, "NotEqual");
+        return HostResult.Err(vm, "NotEqual");
     }
-    return .Ok(vm, args[0]);
+    return HostResult.Ok(vm, args[0]);
 }
 
 /// > assert(what: any) -> what
 /// panics if the value is falsy
 pub fn assert_(args: []const Data, vm: *VM) !HostResult {
     if (revo.isFalse(args[0])) return panic_(&[1]Data{args[0]}, vm);
-    return .okData(args[0]);
+    return .data(args[0]);
 }
 
 /// > assert(what: any) -> what
@@ -676,7 +709,7 @@ pub fn assert_eq(args: []const Data, vm: *VM) !HostResult {
         try vm.setPanicMessage(buf.written());
         return .other("panic");
     }
-    return .okData(args[0]);
+    return .data(args[0]);
 }
 
 /// > print(args: any...) -> atom
@@ -689,7 +722,7 @@ pub fn print(args: []const Data, vm: *VM) !HostResult {
     if (args.len == 0) {
         _ = try pw.interface.writeAll("\n");
         try pw.flush();
-        return okAtom(vm);
+        return HostResult.coreAtom(.ok);
     }
     for (args, 0..) |a, idx| {
         if (idx != 0) _ = try pw.interface.writeAll(" ");
@@ -697,7 +730,7 @@ pub fn print(args: []const Data, vm: *VM) !HostResult {
     }
     try pw.interface.print("\n", .{});
     try pw.flush();
-    return .{ .ok = revo.Data.new.core(.ok) };
+    return .data(revo.Data.new.core(.ok));
 }
 
 /// > panic(args: any...) -> error
@@ -722,7 +755,7 @@ pub fn system_(tbl: []const Data, vm: *VM) !HostResult {
     const args = tbl[0].asTable().?;
     const table = try vm.tables.get(args);
 
-    if (table.array.items.len == 0) return .Err(vm, "EmptyArgs");
+    if (table.array.items.len == 0) return HostResult.Err(vm, "EmptyArgs");
 
     var argv = try vm.runtime.alloc.alloc([]const u8, table.array.items.len);
     defer vm.runtime.alloc.free(argv);
@@ -751,7 +784,7 @@ pub fn system_(tbl: []const Data, vm: *VM) !HostResult {
 
     const so = try vm.adoptDataString(try multi_reader.toOwnedSlice(0));
     const se = try vm.adoptDataString(try multi_reader.toOwnedSlice(1));
-    return .Ok(vm, Data.new.tuple(try vm.tuples.create(&[2]Data{ so, se })));
+    return HostResult.Ok(vm, Data.new.tuple(try vm.tuples.create(&[2]Data{ so, se })));
 }
 
 // for some reason leftover buffer persists between input() calls so multiline os reads
@@ -800,7 +833,7 @@ pub fn input(args: []const Data, vm: *VM) !HostResult {
             const rest = input_buf[di + 1 .. input_buf_len];
             std.mem.copyForwards(u8, input_buf[0..rest.len], rest);
             input_buf_len = rest.len;
-            return resultTuple(vm, .ok, try vm.adoptDataString(try result.toOwnedSlice(vm.runtime.alloc)));
+            return HostResult.Ok(vm, try vm.adoptDataString(try result.toOwnedSlice(vm.runtime.alloc)));
         }
 
         try result.appendSlice(vm.runtime.alloc, input_buf[0..input_buf_len]);
@@ -811,8 +844,8 @@ pub fn input(args: []const Data, vm: *VM) !HostResult {
         const n = file.readStreaming(vm.runtime.io, &.{input_buf[input_buf_len..]}) catch |err| switch (err) {
             error.EndOfStream => {
                 if (result.items.len > 0)
-                    return resultTuple(vm, .ok, try vm.adoptDataString(try result.toOwnedSlice(vm.runtime.alloc)));
-                return .Err(vm, "EndOfStream");
+                    return HostResult.Ok(vm, try vm.adoptDataString(try result.toOwnedSlice(vm.runtime.alloc)));
+                return HostResult.Err(vm, "EndOfStream");
             },
             else => |e| return e,
         };
@@ -823,7 +856,7 @@ pub fn input(args: []const Data, vm: *VM) !HostResult {
                 const rest = input_buf[di + 1 .. total];
                 std.mem.copyForwards(u8, input_buf[0..rest.len], rest);
                 input_buf_len = rest.len;
-                return resultTuple(vm, .ok, try vm.adoptDataString(try result.toOwnedSlice(vm.runtime.alloc)));
+                return HostResult.Ok(vm, try vm.adoptDataString(try result.toOwnedSlice(vm.runtime.alloc)));
             }
         }
         try result.appendSlice(vm.runtime.alloc, input_buf[0..total]);
@@ -839,7 +872,7 @@ pub fn gensym(args: []const Data, vm: *VM) !HostResult {
     gensym_counter += 1;
     const name = try std.fmt.allocPrint(vm.runtime.alloc, "__gensym_{d}", .{n});
     defer vm.runtime.alloc.free(name);
-    return .{ .ok = try vm.ownDataStringNoDedup(name) };
+    return .data(try vm.ownDataStringNoDedup(name));
 }
 
 test "gensym produces different values on each call" {
@@ -854,7 +887,7 @@ pub fn cwd(args: []const Data, vm: *VM) !HostResult {
     _ = args;
     const cwd_path = try std.Io.Dir.cwd().realPathFileAlloc(vm.runtime.io, ".", vm.runtime.alloc);
     defer vm.runtime.alloc.free(cwd_path);
-    return .{ .ok = try vm.ownDataString(cwd_path) };
+    return .data(try vm.ownDataString(cwd_path));
 }
 
 pub fn exit(args: []const Data, vm: *VM) noreturn {
@@ -865,11 +898,7 @@ pub fn exit(args: []const Data, vm: *VM) noreturn {
 }
 
 pub fn getenv_(args: []const Data, vm: *VM) !HostResult {
-    const name = args[0].asString() orelse return .{ .err = .{ .type_error = .{
-        .arg = 0,
-        .expected = "string",
-        .got = typeof(args[0], vm),
-    } } };
+    const name = args[0].asString() orelse return .errType(0, "string", typeof(args[0], vm));
 
     const name_s = vm.stringValue(name);
     const name_z = try vm.runtime.alloc.dupeSentinel(u8, name_s, 0);
@@ -877,22 +906,14 @@ pub fn getenv_(args: []const Data, vm: *VM) !HostResult {
     // really dont feel like threading environ_map down from main, sorry
     if (std.c.getenv(name_z)) |val| {
         const slice = std.mem.span(val);
-        return .{ .ok = try vm.ownDataString(slice) };
+        return .data(try vm.ownDataString(slice));
     }
-    return .{ .ok = Data.new.nil() };
+    return .data(Data.new.nil());
 }
 
 pub fn setenv_(args: []const Data, vm: *VM) !HostResult {
-    const name = args[0].asString() orelse return .{ .err = .{ .type_error = .{
-        .arg = 0,
-        .expected = "string",
-        .got = typeof(args[0], vm),
-    } } };
-    const value = args[1].asString() orelse return .{ .err = .{ .type_error = .{
-        .arg = 1,
-        .expected = "string",
-        .got = typeof(args[1], vm),
-    } } };
+    const name = args[0].asString() orelse return .errType(0, "string", typeof(args[0], vm));
+    const value = args[1].asString() orelse return .errType(1, "string", typeof(args[1], vm));
 
     const name_s = vm.stringValue(name);
     const value_s = vm.stringValue(value);
@@ -903,20 +924,16 @@ pub fn setenv_(args: []const Data, vm: *VM) !HostResult {
 
     // really dont feel like threading environ_map down from main, sorry
     _ = libc_setenv(name_z.ptr, value_z.ptr, 1);
-    return .{ .ok = Data.new.core(.ok) };
+    return .data(Data.new.core(.ok));
 }
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 const libc_setenv = setenv;
 
 pub fn import(args: []const Data, vm: *VM) !HostResult {
-    if (args.len != 1) return .{ .err = .{ .wrong_arity = .{ .got = args.len, .expected = 1 } } };
+    if (args.len != 1) return .errArity(args.len, 1);
 
-    const raw_path = args[0].asString() orelse return .{ .err = .{ .type_error = .{
-        .arg = 0,
-        .expected = "string",
-        .got = typeof(args[0], vm),
-    } } };
+    const raw_path = args[0].asString() orelse return .errType(0, "string", typeof(args[0], vm));
     const raw_path_s = vm.stringValue(raw_path);
 
     const resolved_path = try revo.resolveImportFile(
@@ -926,13 +943,13 @@ pub fn import(args: []const Data, vm: *VM) !HostResult {
         vm.module_dir,
         vm.project_root,
         vm.package_path.items,
-    ) orelse return HostResult.errModuleNotFound();
+    ) orelse return .errModuleNotFound();
 
     defer vm.runtime.alloc.free(resolved_path);
     if (std.mem.endsWith(u8, resolved_path, ".d.rv")) {
         // ambient declaration file: compile-time only, no runtime side effects
         const t_id = try vm.tables.create();
-        return .okData(Data.new.table(t_id));
+        return .data(Data.new.table(t_id));
     }
     if (std.mem.endsWith(u8, resolved_path, ".so") or std.mem.endsWith(u8, resolved_path, ".dylib")) {
         const can_dlopen = switch (builtin.target.os.tag) {
@@ -940,7 +957,7 @@ pub fn import(args: []const Data, vm: *VM) !HostResult {
             else => true,
         };
         if (!can_dlopen) {
-            return .{ .err = .{ .import_failed = "dynamic library loading not supported on this platform" } };
+            return .errImportFailed("dynamic library loading not supported on this platform");
         }
         // try native (host function) path first; extensions that export
         // `revo_native_bindings` get full arity/type checking
@@ -956,15 +973,15 @@ pub fn import(args: []const Data, vm: *VM) !HostResult {
                     vm,
                 );
             }
-            return .okData(Data.new.table(t_id));
+            return .data(Data.new.table(t_id));
         } else |err| switch (err) {
             error.NoBindings => {},
-            else => return .{ .err = .{ .import_failed = @errorName(err) } },
+            else => return .errImportFailed(@errorName(err)),
         }
 
         const mods = revo.ffi.loadC(vm, resolved_path) catch |err| switch (err) {
-            error.NoBindings => return .{ .err = .{ .import_failed = "extension has no revo_native_bindings or revo_bindings export" } },
-            else => return .{ .err = .{ .import_failed = @errorName(err) } },
+            error.NoBindings => return .errImportFailed("extension has no revo_native_bindings or revo_bindings export"),
+            else => return .errImportFailed(@errorName(err)),
         };
         defer vm.runtime.alloc.free(mods);
         const t_id = try vm.tables.create();
@@ -978,18 +995,18 @@ pub fn import(args: []const Data, vm: *VM) !HostResult {
                 vm,
             );
         }
-        return .okData(Data.new.table(t_id));
+        return .data(Data.new.table(t_id));
     }
 
     const current_stamp = try vm.moduleStamp(resolved_path);
     if (vm.module_cache.get(resolved_path)) |cached| {
         if (std.meta.eql(cached.stamp, current_stamp)) {
-            return .{ .ok = cached.result };
+            return .data(cached.result);
         }
         _ = vm.invalidateModuleCache(resolved_path);
     }
     for (vm.loading_stack.items) |loading| {
-        if (std.mem.eql(u8, loading, resolved_path)) return HostResult.errCyclicImport();
+        if (std.mem.eql(u8, loading, resolved_path)) return .errCyclicImport();
     }
 
     const source = try std.Io.Dir.cwd().readFileAlloc(
@@ -1015,7 +1032,7 @@ pub fn import(args: []const Data, vm: *VM) !HostResult {
     _ = vm.loading_stack.pop();
 
     try vm.module_cache.put(cache_key, .{ .result = result, .stamp = current_stamp });
-    return .{ .ok = result };
+    return .data(result);
 }
 
 fn append_data(writer: *std.Io.Writer, val: Data, vm: *VM, mode: Data.RenderMode) !void {
@@ -1027,7 +1044,7 @@ pub fn callUnaryMetamethod(mm: Data, val: Data, vm: *VM) HostResult {
     const result = vm.callFunctionParts(mm, null, &.{val}, null) catch |err| {
         return .other(@errorName(err));
     };
-    return .{ .ok = result };
+    return .data(result);
 }
 
 /// > sleep(ms: num) -> parked
@@ -1057,58 +1074,75 @@ pub const HostResult = union(enum) {
     ok: Data,
     err: HostErrPayload,
 
-    pub fn parked() HostResult {
-        return .{ .err = .{ .parked = {} } };
-    }
-    pub fn okBool(b: bool) HostResult {
+    pub fn _bool(b: bool) HostResult {
         return .{ .ok = Data.new.boolean(b) };
     }
+
+    pub fn data(d: Data) HostResult {
+        return .{ .ok = d };
+    }
+
+    pub fn coreAtom(a: revo.core_atoms) HostResult {
+        return .{ .ok = Data.new.atom(@intFromEnum(a)) };
+    }
+
+    pub fn Ok(vm: *VM, value: Data) !HostResult {
+        return makeResultTuple(vm, .ok, value);
+    }
+
+    pub fn Err(vm: *VM, err_name: []const u8) !HostResult {
+        const tag = try vm.internAtom(err_name);
+        return makeResultTuple(vm, .err, Data.new.atom(tag));
+    }
+
+    pub fn errData(vm: *VM, value: Data) !HostResult {
+        return makeResultTuple(vm, .err, value);
+    }
+    // -- [errors] ------------------------------------------------------------
     pub fn errArity(got: usize, expected: usize) HostResult {
         return .{ .err = .{ .wrong_arity = .{ .got = got, .expected = expected } } };
     }
+
     pub fn errType(arg: usize, expected: []const u8, got: []const u8) HostResult {
         return .{ .err = .{ .type_error = .{ .arg = arg, .expected = expected, .got = got } } };
     }
-    pub fn okData(d: Data) HostResult {
-        return .{ .ok = d };
-    }
-    pub fn okCa(a: revo.core_atoms) HostResult {
-        return .{ .ok = Data.new.atom(@intFromEnum(a)) };
-    }
+
     pub fn other(message: []const u8) HostResult {
         return .{ .err = .{ .other = message } };
     }
+
     pub fn panic() HostResult {
         return .{ .err = .{ .other = "panic" } };
     }
+
     pub fn errModuleNotFound() HostResult {
         return .{ .err = .{ .module_not_found = {} } };
     }
+
     pub fn errCyclicImport() HostResult {
         return .{ .err = .{ .cyclic_import = {} } };
     }
+
     pub fn errImportFailed(msg: []const u8) HostResult {
         return .{ .err = .{ .import_failed = msg } };
     }
+
     pub fn errAssertionFailed(msg: []const u8) HostResult {
         return .{ .err = .{ .assertion_failed = msg } };
     }
+
     pub fn errIo(msg: []const u8) HostResult {
         return .{ .err = .{ .io_error = msg } };
     }
 
-    pub fn Ok(vm: *VM, value: Data) !HostResult {
-        return resultTuple(vm, .ok, value);
-    }
-
-    pub fn Err(vm: *VM, err_atom: []const u8) !HostResult {
-        const tag = try vm.internAtom(err_atom);
-        return resultTuple(vm, .err, Data.new.atom(tag));
+    // not an error
+    pub fn parked() HostResult {
+        return .{ .err = .{ .parked = {} } };
     }
 };
 
 pub fn wasm_stub(_: []const Data, _: *VM) anyerror!HostResult {
-    return HostResult.other("function unavailable on this platform");
+    return .other("function unavailable on this platform");
 }
 
 pub fn defineStub(comptime types: []const TypeSpec) HostFunc {
@@ -1136,10 +1170,10 @@ pub fn typeUtils(vm: *VM) !void {
             fn is_of(args: []const Data, _: *VM) !HostResult {
                 for (args) |arg| {
                     if (arg.tag() != @field(revo.memory.Type, field.name)) {
-                        return .okBool(false);
+                        return ._bool(false);
                     }
                 }
-                return .okBool(true);
+                return ._bool(true);
             }
         }.is_of;
         const id = try vm.functions.create(.{ .host = define(
@@ -1154,9 +1188,9 @@ pub fn typeUtils(vm: *VM) !void {
     const is_number = struct {
         fn number(args: []const Data, _: *VM) !HostResult {
             for (args) |arg| {
-                if (!arg.isNumber()) return .okBool(false);
+                if (!arg.isNumber()) return ._bool(false);
             }
-            return .okBool(true);
+            return ._bool(true);
         }
     }.number;
     const id = try vm.functions.create(.{ .host = define(&[_]TypeSpec{.any}, is_number) });
@@ -1287,4 +1321,118 @@ test "expect" {
     try testing.topNumber(
         \\ expect(42)?
     , 42);
+}
+//
+// module wrappers
+//
+
+/// for use in impl fn signatures: `fn foo(vm: *VM, self: Ts.string) !HostResult`
+/// made nominal
+pub const T = struct {
+    pub const string = enum(mem.StringID) { _ };
+    pub const number = f64;
+    pub const atom = enum(mem.AtomID) { _ };
+    pub const function = enum(mem.FunctionID) { _ };
+    pub const table = enum(mem.TableID) { _ };
+    pub const tuple = enum(mem.TupleID) { _ };
+    pub const any = Data;
+};
+
+/// reverse mapping
+/// distinct T type -> TypeSpec variant
+pub fn typeToSpec(comptime P: type) TypeSpec {
+    if (P == T.string) return .string;
+    if (P == T.number) return .number;
+    if (P == T.atom) return .atom;
+    if (P == T.function) return .function;
+    if (P == T.table) return .table;
+    if (P == T.tuple) return .tuple;
+    if (P == bool) return .bool;
+    if (P == Data) return .any;
+    @compileError("unsupported type in def: " ++ @typeName(P));
+}
+
+/// unwrap one Data arg into the typed value the impl fn expects
+pub fn unwrapArg(comptime spec: TypeSpec, data: Data) specToType(spec) {
+    return switch (spec) {
+        .number => data.asNum().?,
+        .string => @enumFromInt(data.asString().?),
+        .atom => @enumFromInt(data.asAtom().?),
+        .function => @enumFromInt(data.asFunction().?),
+        .table => @enumFromInt(data.asTable().?),
+        .tuple => @enumFromInt(data.asTuple().?),
+        .bool => isBoolAtom(data.asAtom().?),
+        .any => data,
+    };
+}
+
+/// inspects fn signature at comptime, derives TypeSpec array, generates unwrapping wrapper
+pub fn def(comptime impl: anytype) HostFunc {
+    const fn_info = @typeInfo(@TypeOf(impl)).@"fn";
+    comptime {
+        if (fn_info.params.len < 1) @compileError("def requires (vm, ...) signature");
+        if (fn_info.params[0].type.? != *VM) @compileError("first param must be *VM");
+    }
+    const count = fn_info.params.len - 1;
+    const Storage = struct {
+        pub const specs: [count]TypeSpec = blk: {
+            var result: [count]TypeSpec = undefined;
+            for (fn_info.params[1..], 0..) |param, i| {
+                result[i] = typeToSpec(param.type.?);
+            }
+            break :blk result;
+        };
+        pub const all_types: [count + 1]type = blk: {
+            var result: [count + 1]type = undefined;
+            result[0] = *VM;
+            for (specs, 0..) |spec, i| {
+                result[i + 1] = specToType(spec);
+            }
+            break :blk result;
+        };
+        pub const FullArgs = std.meta.Tuple(&all_types);
+    };
+    return define(&Storage.specs, struct {
+        fn call(raw: []const Data, vm: *VM) anyerror!HostResult {
+            var args: Storage.FullArgs = undefined;
+            args[0] = vm;
+            inline for (Storage.specs, 0..) |spec, i| {
+                args[i + 1] = unwrapArg(spec, raw[i]);
+            }
+            return @call(.auto, impl, args);
+        }
+    }.call);
+}
+
+fn countFn(comptime S: type) comptime_int {
+    comptime {
+        var c: usize = 0;
+        for (@typeInfo(S).@"struct".decls) |decl| {
+            if (@typeInfo(@TypeOf(@field(S, decl.name))) == .@"fn") c += 1;
+        }
+        return c;
+    }
+}
+
+/// generic struct -> impls array
+/// iterates pub fn decls in the struct,
+/// derives TypeSpecs from each fn's parameter types, wraps with def()
+pub fn impls(comptime ImplType: type) type {
+    const decls = @typeInfo(ImplType).@"struct".decls;
+    const count = countFn(ImplType);
+    return struct {
+        pub const impls_list: [count]api.Impl = blk: {
+            var result: [count]api.Impl = undefined;
+            var i: usize = 0;
+            for (decls) |decl| {
+                const f = @field(ImplType, decl.name);
+                if (@typeInfo(@TypeOf(f)) == .@"fn") {
+                    result[i] = .{ .name = decl.name, .f = def(f) };
+                    i += 1;
+                }
+            }
+            break :blk result;
+        };
+        pub const val: *const [count]api.Impl = &impls_list;
+    };
 }

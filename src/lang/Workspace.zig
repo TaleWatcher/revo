@@ -1545,9 +1545,12 @@ const FindImportVisitor = struct {
     }
 };
 
-/// find the dep file id for a module name — tries filename match first,
-/// then falls back to resolving `const <name> = import '<path>'` in the AST
-fn resolveDepId(self: *Workspace, alloc: std.mem.Allocator, file_id: FileId, mod_name: []const u8) ?FileId {
+fn resolveDepId(
+    self: *Workspace,
+    alloc: std.mem.Allocator,
+    file_id: FileId,
+    mod_name: []const u8,
+) ?FileId {
     const deps = self.dependencyClosure(alloc, file_id) catch return null;
     defer alloc.free(deps);
     for (deps) |dep_id| {

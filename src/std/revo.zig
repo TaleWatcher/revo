@@ -1,45 +1,65 @@
-// for metaprogramming
+const Ts = root.T;
 
-pub const impls: []const api.Impl = &.{
-    .{ .name = "eval", .f = root.define(&.{.string}, eval) },
-    .{ .name = "dofile", .f = if (@import("build_options").is_freestanding) root.defineStub(&.{.string}) else root.define(&.{.string}, dofile) },
-    .{ .name = "build", .f = root.define(&.{.string}, build) },
-    .{ .name = "version", .f = root.define(&.{}, version) },
+pub const Impl = struct {
+    pub fn eval(vm: *VM, source: Ts.string) !HostResult {
+        const src = vm.stringValue(@intFromEnum(source));
+        const res = revo.module.runModule(vm, "<eval>", src, true) catch {
+            return .other("eval failed");
+        };
+        return switch (res) {
+            .ok => HostResult.Ok(vm, vm.currentFiber().result),
+            .err => |err| {
+                const err_str = try vm.ownDataString(revo.lang.diagnostic.firstError(err.report).?);
+                return HostResult.errData(vm, err_str);
+            },
+        };
+    }
+
+    pub fn build(vm: *VM, source: Ts.string) !HostResult {
+        const src = vm.stringValue(@intFromEnum(source));
+        const result = try revo.lang.build(vm, .{ .text = src, .name = "<anon>" }, .{});
+        switch (result) {
+            .ok => |artifact| {
+                defer vm.runtime.alloc.free(artifact.instructions);
+                defer vm.runtime.alloc.free(artifact.spans);
+                const bc = try revo.bytecode.serialize(vm, artifact, vm.runtime.alloc);
+                defer vm.runtime.alloc.free(bc);
+                const sid = try vm.strings.own(bc);
+                return HostResult.Ok(vm, Data.new.str(sid));
+            },
+            .err => |err| switch (err) {
+                .lower => |e| return HostResult.errData(vm, try vm.ownDataString(revo.lang.diagnostic.firstError(e.report).?)),
+                .expand => |e| return HostResult.errData(vm, try vm.ownDataString(revo.lang.diagnostic.firstError(e.report).?)),
+                .parse => |e| return HostResult.errData(vm, try vm.ownDataString(revo.lang.diagnostic.firstError(e.report).?)),
+                .semantic => |e| return HostResult.errData(vm, try vm.ownDataString(revo.lang.diagnostic.firstError(e.report).?)),
+            },
+        }
+    }
+
+    pub fn version(vm: *VM) !HostResult {
+        const v = @import("build_options").version;
+        return if (@import("builtin").mode == .Debug)
+            .data(try vm.ownDataString("revo #" ++ v))
+        else
+            .data(try vm.ownDataString("revo v" ++ v));
+    }
 };
 
-pub fn version(args: []const Data, vm: *VM) !HostResult {
-    _ = args;
-    const v = @import("build_options").version;
+pub const impls: []const api.Impl = root.impls(Impl).val ++ &[_]api.Impl{
+    .{ .name = "dofile", .f = if (@import("build_options").is_freestanding) root.defineStub(&.{.string}) else root.define(&.{.string}, dofile) },
+};
 
-    return if (@import("builtin").mode == .Debug)
-        .okData(try vm.ownDataString("revo #" ++ v))
-    else
-        .okData(try vm.ownDataString("revo v" ++ v));
+test "native eval works" {
+    try testing.topNumber(
+        \\ const (_, res) = revo.eval("21*2")
+        \\ res
+    , 42);
 }
 
-/// > eval(code: string) -> !any
-/// evaluates it as a module, gives you back its' return value
-/// you can treat it as a function's body
-pub fn eval(args: []const Data, vm: *VM) !HostResult {
-    if (args.len != 1) return .errArity(args.len, 1);
-
-    const source = switch (args[0].tag()) {
-        .string => vm.stringValue(args[0].asString().?),
-        else => return .errType(0, "string", typeof(args[0], vm)),
-    };
-
-    const source_name = "<eval>";
-    const res = revo.module.runModule(vm, source_name, source, true) catch {
-        return .other("eval failed");
-    };
-
-    return switch (res) {
-        .ok => root.resultTuple(vm, .ok, vm.currentFiber().result),
-        .err => |err| {
-            const err_str = try vm.ownDataString(revo.lang.diagnostic.firstError(err.report).?);
-            return root.resultTuple(vm, .err, err_str);
-        },
-    };
+test "revo.build compiles source" {
+    try testing.topAtom(
+        \\ revo.build("1 + 1")[0]
+    , "ok");
 }
 
 /// > dofile(path: string) -> !any
@@ -74,7 +94,7 @@ pub fn dofile(args: []const Data, vm: *VM) !HostResult {
         .limited(fs.max_read_size),
     ) catch |err| {
         const msg = try vm.ownDataString(fs.mapIOError(err));
-        return root.resultTuple(vm, .err, msg);
+        return HostResult.errData(vm, msg);
     };
     defer vm.runtime.alloc.free(source);
 
@@ -83,65 +103,13 @@ pub fn dofile(args: []const Data, vm: *VM) !HostResult {
     };
 
     return switch (res) {
-        .ok => root.resultTuple(vm, .ok, vm.currentFiber().result),
+        .ok => HostResult.Ok(vm, vm.currentFiber().result),
         .err => |err| {
             const err_str = try vm.ownDataString(revo.lang.diagnostic.firstError(err.report).?);
-            return root.resultTuple(vm, .err, err_str);
+            return HostResult.errData(vm, err_str);
         },
     };
 }
-
-/// > build(code: string) -> !any
-/// builds it as a module, gives you back its' bytecode in a string
-/// the string is only useful for writing to a file or executing
-pub fn build(args: []const Data, vm: *VM) !HostResult {
-    const source = vm.stringValue(args[0].asString().?);
-
-    const result = try revo.lang.build(vm, .{ .text = source, .name = "<anon>" }, .{});
-
-    switch (result) {
-        .ok => |artifact| {
-            defer vm.runtime.alloc.free(artifact.instructions);
-            defer vm.runtime.alloc.free(artifact.spans);
-
-            const bc = try revo.bytecode.serialize(vm, artifact, vm.runtime.alloc);
-            defer vm.runtime.alloc.free(bc);
-            // super slow
-            const sid = try vm.strings.own(bc);
-            return root.resultTuple(vm, .ok, Data.new.str(sid));
-        },
-        .err => |err| switch (err) {
-            .lower => |e| return root.resultTuple(vm, .err, try vm.ownDataString(revo.lang.diagnostic.firstError(e.report).?)),
-            .expand => |e| return root.resultTuple(vm, .err, try vm.ownDataString(revo.lang.diagnostic.firstError(e.report).?)),
-            .parse => |e| return root.resultTuple(vm, .err, try vm.ownDataString(revo.lang.diagnostic.firstError(e.report).?)),
-            .semantic => |e| return root.resultTuple(vm, .err, try vm.ownDataString(revo.lang.diagnostic.firstError(e.report).?)),
-        },
-    }
-}
-
-test "native eval works" {
-    try testing.topNumber(
-        \\ const (_, res) = revo.eval("21*2")
-        \\ res
-    , 42);
-}
-
-test "revo.build compiles source" {
-    try testing.topAtom(
-        \\ revo.build("1 + 1")[0]
-    , "ok");
-}
-
-const revo = @import("../root.zig");
-const testing = revo.lang.testing;
-const std = @import("std");
-const Data = revo.Data;
-const VM = revo.VM;
-const api = @import("api.zig");
-const root = @import("root.zig");
-const fs = @import("fs.zig");
-const HostResult = root.HostResult;
-const typeof = root.typeof;
 
 test "revo.dofile returns the file's value" {
     var tmp = std.testing.tmpDir(.{});
@@ -174,3 +142,14 @@ test "revo.dofile resolves relative paths against the module dir" {
         \\ revo.dofile("./dep.rv")[1]
     , "from-dep");
 }
+
+const revo = @import("../root.zig");
+const testing = revo.lang.testing;
+const std = @import("std");
+const Data = revo.Data;
+const VM = revo.VM;
+const api = @import("api.zig");
+const root = @import("root.zig");
+const fs = @import("fs.zig");
+const HostResult = root.HostResult;
+const typeof = root.typeof;
