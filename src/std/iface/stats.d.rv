@@ -1,0 +1,8 @@
+#!
+statistics functions
+!#
+
+#*
+counts frequencies of elements in an array table and returns a mapping of elements to their counts
+*#
+pub declare stats.frequencies = fn(self: table<any>) -> table<any, int>
