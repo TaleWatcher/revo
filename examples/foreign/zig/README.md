@@ -51,7 +51,7 @@ fn add(args: []const Data, _: *VM) anyerror!HostResult {
     if (args.len < 2) return HostResult.errArity(args.len, 2);
     const a = args[0].asNum() orelse return HostResult.errType(0, "number", "other");
     const b = args[1].asNum() orelse return HostResult.errType(1, "number", "other");
-    return HostResult.okData(Data.new.num(a + b));
+    return HostResult.data(Data.new.num(a + b));
 }
 
 pub export const revo_native_bindings = [_]HostBinding{
@@ -65,9 +65,9 @@ pub export const revo_native_bindings = [_]HostBinding{
 **just values**
 ```zig
 // success
-return HostResult.okData(Data.new.num(42));
-return HostResult.okData(Data.new.str(string_id));
-return HostResult.okBool(true);
+return HostResult.data(Data.new.num(42));
+return HostResult.data(Data.new.str(string_id));
+return HostResult._bool(true);
 
 // error with arity info
 return HostResult.errArity(got, expected);
@@ -89,7 +89,7 @@ fn echo(args: []const Data, vm: *VM) anyerror!HostResult {
     const bytes = vm.stringValue(id);
     // intern a new string
     const new_id = revo.ffi.revo_intern(@ptrCast(vm), @intFromPtr(bytes.ptr), bytes.len);
-    return HostResult.okData(Data.new.str(new_id));
+    return HostResult.data(Data.new.str(new_id));
 }
 ```
 

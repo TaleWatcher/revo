@@ -12,41 +12,41 @@ const Reader = csv.Reader;
 const Writer = csv.Writer;
 const Record = csv.Record;
 
-pub const impls: []const api.Impl = &.{
-    .{ .name = "encode", .f = root.define(&.{.any}, encode) },
-    .{ .name = "decode", .f = root.define(&.{.string}, decode) },
-};
+const Ts = root.T;
 
-fn encode(args: []const Data, vm: *VM) !HostResult {
-    var buffer = std.Io.Writer.Allocating.init(vm.runtime.alloc);
-    defer buffer.deinit();
-    var writer = Writer.init(&buffer.writer, .{});
-    try writeCsvValue(args[0], vm, &writer, false);
+pub const Impl = struct {
+    pub fn encode(vm: *VM, data: Ts.any) !HostResult {
+        var buffer = std.Io.Writer.Allocating.init(vm.runtime.alloc);
+        defer buffer.deinit();
+        var writer = Writer.init(&buffer.writer, .{});
+        try writeCsvValue(data, vm, &writer, false);
 
-    const slice = try buffer.toOwnedSlice();
-    const data = try vm.adoptDataString(slice);
-    return root.resultTuple(vm, .ok, data);
-}
-
-fn decode(args: []const Data, vm: *VM) !HostResult {
-    const source = vm.stringValue(args[0].asString().?);
-    var fixed_reader = std.Io.Reader.fixed(source);
-    var reader = Reader.init(&fixed_reader, .{});
-
-    const table_id = try vm.tables.create();
-
-    var record = Record.init(vm.runtime.alloc);
-    defer record.deinit();
-
-    while (try reader.next(&record)) {
-        const data = try recordToData(record, vm);
-        const table = try vm.tables.get(table_id);
-        try table.push(data);
+        const slice = try buffer.toOwnedSlice();
+        const result = try vm.adoptDataString(slice);
+        return HostResult.Ok(vm, result);
     }
 
-    const data = Data.new.table(table_id);
-    return HostResult.okData(data);
-}
+    pub fn decode(vm: *VM, source: Ts.string) !HostResult {
+        const str = vm.stringValue(@intFromEnum(source));
+        var fixed_reader = std.Io.Reader.fixed(str);
+        var reader = Reader.init(&fixed_reader, .{});
+
+        const table_id = try vm.tables.create();
+
+        var record = Record.init(vm.runtime.alloc);
+        defer record.deinit();
+
+        while (try reader.next(&record)) {
+            const data = try recordToData(record, vm);
+            const table = try vm.tables.get(table_id);
+            try table.push(data);
+        }
+
+        return .data(Data.new.table(table_id));
+    }
+};
+
+pub const impls = root.impls(Impl).val;
 
 fn recordToData(record: Record, vm: *VM) anyerror!Data {
     const table_id = try vm.tables.create();
@@ -60,14 +60,12 @@ fn recordToData(record: Record, vm: *VM) anyerror!Data {
 }
 
 fn fieldToData(field: []const u8, vm: *VM) !Data {
-    // attempt to parse a number, or just use a string
     if (std.fmt.parseInt(i64, field, 10) catch null) |num| {
         return Data.new.num(num);
     } else if (std.fmt.parseFloat(f64, field) catch null) |float| {
         return Data.new.num(float);
     } else {
-        const string = try vm.ownDataString(field);
-        return string;
+        return try vm.ownDataString(field);
     }
 }
 

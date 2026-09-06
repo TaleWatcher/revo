@@ -1,52 +1,41 @@
-pub const impls: []const api.Impl = &.{
-    .{ .name = "__call", .f = root.define(&.{ .any, .any }, call) },
-    .{ .name = "is_nan?", .f = root.define(&.{.number}, isNan) },
-    .{ .name = "is_finite?", .f = root.define(&.{.number}, isFinite) },
-    .{ .name = "is_inf?", .f = root.define(&.{.number}, isInf) },
-    .{ .name = "floor", .f = root.define(&.{.number}, floor) },
-    .{ .name = "ceil", .f = root.define(&.{.number}, ceil) },
-    .{ .name = "round", .f = root.define(&.{.number}, round) },
-    .{ .name = "abs", .f = root.define(&.{.number}, abs) },
+const Ts = root.T;
+
+pub const Impl = struct {
+    pub fn @"is_nan?"(vm: *VM, n: Ts.number) !HostResult {
+        _ = vm;
+        return ._bool(std.math.isNan(n));
+    }
+    pub fn @"is_finite?"(vm: *VM, n: Ts.number) !HostResult {
+        _ = vm;
+        return ._bool(std.math.isFinite(n));
+    }
+    pub fn @"is_inf?"(vm: *VM, n: Ts.number) !HostResult {
+        _ = vm;
+        return ._bool(std.math.isInf(n));
+    }
+    pub fn floor(vm: *VM, n: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(@floor(n)));
+    }
+    pub fn ceil(vm: *VM, n: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(@ceil(n)));
+    }
+    pub fn round(vm: *VM, n: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(@round(n)));
+    }
+    pub fn abs(vm: *VM, n: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(@abs(n)));
+    }
+    pub fn __call(vm: *VM, self: Ts.any, val: Ts.any) !HostResult {
+        _ = self;
+        return root.number_(&.{val}, vm);
+    }
 };
 
-// -- [impl] ------------------------------------------------------------------
-
-fn number(args: []const Data) f64 {
-    return args[0].asNum().?;
-}
-
-fn call(args: []const Data, vm: *VM) !HostResult {
-    _ = args[0];
-    return root.number_(args[1..], vm);
-}
-
-fn isNan(args: []const Data, _: *VM) !HostResult {
-    return .okBool(std.math.isNan(number(args)));
-}
-
-fn isFinite(args: []const Data, _: *VM) !HostResult {
-    return .okBool(std.math.isFinite(number(args)));
-}
-
-fn isInf(args: []const Data, _: *VM) !HostResult {
-    return .okBool(std.math.isInf(number(args)));
-}
-
-fn floor(args: []const Data, _: *VM) !HostResult {
-    return .okData(Data.new.num(@floor(number(args))));
-}
-
-fn ceil(args: []const Data, _: *VM) !HostResult {
-    return .okData(Data.new.num(@ceil(number(args))));
-}
-
-fn round(args: []const Data, _: *VM) !HostResult {
-    return .okData(Data.new.num(@round(number(args))));
-}
-
-fn abs(args: []const Data, _: *VM) !HostResult {
-    return .okData(Data.new.num(@abs(number(args))));
-}
+pub const impls = root.impls(Impl).val;
 
 test "number module and metatable" {
     try testing.topNumber("unwrap(number(\"12\"))", 12);

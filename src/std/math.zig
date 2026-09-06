@@ -1,111 +1,118 @@
-// zig fmt: off
-const MathOps = struct {
-    pub fn abs(x: f64) f64 { return @abs(x); }
-    pub fn floor(x: f64) f64 { return @floor(x); }
-    pub fn ceil(x: f64) f64 { return @ceil(x); }
-    pub fn sqrt(x: f64) f64 { return @sqrt(x); }
-    pub fn pow(base: f64, exponent: f64) f64 { return std.math.pow(f64, base, exponent); }
-    pub fn sin(x: f64) f64 { return @sin(x); }
-    pub fn asin(x: f64) f64 { return std.math.asin(x); }
-    pub fn sinh(x: f64) f64 { return std.math.sinh(x); }
-    pub fn asinh(x: f64) f64 { return std.math.asinh(x); }
-    pub fn cos(x: f64) f64 { return @cos(x); }
-    pub fn acos(x: f64) f64 { return std.math.acos(x); }
-    pub fn cosh(x: f64) f64 { return std.math.cosh(x); }
-    pub fn acosh(x: f64) f64 { return std.math.acosh(x); }
-    pub fn tan(x: f64) f64 { return @tan(x); }
-    pub fn atan(x: f64) f64 { return std.math.atan(x); }
-    pub fn tanh(x: f64) f64 { return std.math.tanh(x); }
-    pub fn atanh(x: f64) f64 { return std.math.atanh(x); }
-    pub fn atan2(y: f64, x: f64) f64 { return std.math.atan2(y, x); }
-    pub fn hypot(x: f64, y: f64) f64 { return std.math.hypot(x, y); }
-    pub fn log(x: f64) f64 { return @log(x); }
-    pub fn exp(x: f64) f64 { return @exp(x); }
-    pub fn sign(value: f64) f64 { return std.math.sign(value); }
+const Ts = root.T;
+
+pub const Impl = struct {
+    pub fn abs(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(@abs(x)));
+    }
+    pub fn floor(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(@floor(x)));
+    }
+    pub fn ceil(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(@ceil(x)));
+    }
+    pub fn sqrt(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(@sqrt(x)));
+    }
+    pub fn pow(vm: *VM, base: Ts.number, exponent: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(std.math.pow(f64, base, exponent)));
+    }
+    pub fn sin(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(@sin(x)));
+    }
+    pub fn asin(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(std.math.asin(x)));
+    }
+    pub fn sinh(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(std.math.sinh(x)));
+    }
+    pub fn asinh(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(std.math.asinh(x)));
+    }
+    pub fn cos(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(@cos(x)));
+    }
+    pub fn acos(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(std.math.acos(x)));
+    }
+    pub fn cosh(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(std.math.cosh(x)));
+    }
+    pub fn acosh(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(std.math.acosh(x)));
+    }
+    pub fn tan(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(@tan(x)));
+    }
+    pub fn atan(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(std.math.atan(x)));
+    }
+    pub fn tanh(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(std.math.tanh(x)));
+    }
+    pub fn atanh(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(std.math.atanh(x)));
+    }
+    pub fn atan2(vm: *VM, y: Ts.number, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(std.math.atan2(y, x)));
+    }
+    pub fn hypot(vm: *VM, x: Ts.number, y: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(std.math.hypot(x, y)));
+    }
+    pub fn log(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(@log(x)));
+    }
+    pub fn exp(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(@exp(x)));
+    }
+    pub fn sign(vm: *VM, x: Ts.number) !HostResult {
+        _ = vm;
+        return .data(Data.new.num(std.math.sign(x)));
+    }
 };
 
-const Pred = struct {
-    pub fn nonNegative(x: f64) bool { return x >= 0; }
-    pub fn positive(x: f64) bool { return x > 0; }
-    pub fn less(a: f64, b: f64) bool { return a < b; }
-    pub fn greater(a: f64, b: f64) bool { return a > b; }
+pub const impls: []const api.Impl = root.impls(Impl).val ++ &[_]api.Impl{
+    .{ .name = "min", .f = root.defineVariadic(&.{.number}, minFn) },
+    .{ .name = "max", .f = root.defineVariadic(&.{.number}, maxFn) },
 };
-// zig fmt: on
 
-//
-// generators
-//
-fn makeUnary(comptime op: fn (f64) f64) root.HostFn {
-    return struct {
-        fn apply(args: []const Data, _: *VM) !HostResult {
-            return .{ .ok = Data.new.num(op(toF64(args[0]))) };
-        }
-    }.apply;
+fn minFn(args: []const Data, _: *VM) !HostResult {
+    var res = args[0].asNum().?;
+    for (args[1..]) |arg| {
+        const val = arg.asNum().?;
+        if (val < res) res = val;
+    }
+    return .data(Data.new.num(res));
 }
 
-fn makeUnaryChecked(
-    comptime op: fn (f64) f64,
-    comptime check: fn (f64) bool,
-    comptime expected: []const u8,
-) root.HostFn {
-    return struct {
-        fn apply(args: []const Data, vm: *VM) !HostResult {
-            const n = toF64(args[0]);
-            if (!check(n))
-                return .errType(0, expected, typeof(args[0], vm));
-            return .{ .ok = Data.new.num(op(n)) };
-        }
-    }.apply;
+fn maxFn(args: []const Data, _: *VM) !HostResult {
+    var res = args[0].asNum().?;
+    for (args[1..]) |arg| {
+        const val = arg.asNum().?;
+        if (val > res) res = val;
+    }
+    return .data(Data.new.num(res));
 }
-
-fn makeBinary(comptime op: fn (f64, f64) f64) root.HostFn {
-    return struct {
-        fn apply(args: []const Data, _: *VM) !HostResult {
-            return .{ .ok = Data.new.num(op(toF64(args[0]), toF64(args[1]))) };
-        }
-    }.apply;
-}
-
-fn makeVariadic(comptime cmp: fn (f64, f64) bool) root.HostFn {
-    return struct {
-        /// returns min or max of all arguments
-        fn apply(args: []const Data, _: *VM) !HostResult {
-            var res = toF64(args[0]);
-            for (args[1..]) |arg| {
-                const val = toF64(arg);
-                if (cmp(val, res)) res = val;
-            }
-            return .{ .ok = Data.new.num(res) };
-        }
-    }.apply;
-}
-
-pub const impls: []const api.Impl = &.{
-    .{ .name = "abs", .f = root.define(&.{.number}, makeUnary(MathOps.abs)) },
-    .{ .name = "floor", .f = root.define(&.{.number}, makeUnary(MathOps.floor)) },
-    .{ .name = "ceil", .f = root.define(&.{.number}, makeUnary(MathOps.ceil)) },
-    .{ .name = "sqrt", .f = root.define(&.{.number}, makeUnaryChecked(MathOps.sqrt, Pred.nonNegative, "non-negative num")) },
-    .{ .name = "pow", .f = root.define(&.{ .number, .number }, makeBinary(MathOps.pow)) },
-    .{ .name = "min", .f = root.defineVariadic(&.{.number}, makeVariadic(Pred.less)) },
-    .{ .name = "max", .f = root.defineVariadic(&.{.number}, makeVariadic(Pred.greater)) },
-    .{ .name = "sin", .f = root.define(&.{.number}, makeUnary(MathOps.sin)) },
-    .{ .name = "asin", .f = root.define(&.{.number}, makeUnary(MathOps.asin)) },
-    .{ .name = "sinh", .f = root.define(&.{.number}, makeUnary(MathOps.sinh)) },
-    .{ .name = "asinh", .f = root.define(&.{.number}, makeUnary(MathOps.asinh)) },
-    .{ .name = "cos", .f = root.define(&.{.number}, makeUnary(MathOps.cos)) },
-    .{ .name = "cosh", .f = root.define(&.{.number}, makeUnary(MathOps.cosh)) },
-    .{ .name = "acos", .f = root.define(&.{.number}, makeUnary(MathOps.acos)) },
-    .{ .name = "acosh", .f = root.define(&.{.number}, makeUnary(MathOps.acosh)) },
-    .{ .name = "tan", .f = root.define(&.{.number}, makeUnary(MathOps.tan)) },
-    .{ .name = "atan", .f = root.define(&.{.number}, makeUnary(MathOps.atan)) },
-    .{ .name = "tanh", .f = root.define(&.{.number}, makeUnary(MathOps.tanh)) },
-    .{ .name = "atanh", .f = root.define(&.{.number}, makeUnary(MathOps.atanh)) },
-    .{ .name = "atan2", .f = root.define(&.{ .number, .number }, makeBinary(MathOps.atan2)) },
-    .{ .name = "hypot", .f = root.define(&.{ .number, .number }, makeBinary(MathOps.hypot)) },
-    .{ .name = "log", .f = root.define(&.{.number}, makeUnaryChecked(MathOps.log, Pred.positive, "positive num")) },
-    .{ .name = "exp", .f = root.define(&.{.number}, makeUnary(MathOps.exp)) },
-    .{ .name = "sign", .f = root.define(&.{.number}, makeUnary(MathOps.sign)) },
-};
 
 test "math library" {
     try testing.topNumber("math.abs(-5)", 5);
@@ -118,11 +125,6 @@ test "math library" {
     try testing.topNumber("math.max(1, 2, 3)", 3);
     try testing.topNumber("math.hypot(3, 4)", 5.0);
     try testing.topNumber("math.sign(-0.15)", -1);
-}
-
-// .number is guaranteed by type sig
-inline fn toF64(d: Data) f64 {
-    return d.asNum().?;
 }
 
 const std = @import("std");

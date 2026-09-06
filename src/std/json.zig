@@ -1,32 +1,27 @@
-pub const impls: []const api.Impl = &.{
-    .{ .name = "encode", .f = root.def(&.{.any}, struct {
-        pub fn f(args: root.ArgsTuple(&.{.any}), vm: *VM) !HostResult {
-            var out = std.Io.Writer.Allocating.init(vm.runtime.alloc);
+const Ts = root.T;
 
-            defer out.deinit();
-            try writeJsonValue(args[0], vm, &out.writer);
-            const slice = try out.toOwnedSlice();
-            const data = try vm.adoptDataString(slice);
-            return root.resultTuple(vm, .ok, data);
-        }
-    }.f) },
-    .{ .name = "decode", .f = root.def(&.{.string}, struct {
-        fn a(args: root.ArgsTuple(&.{.string}), vm: *VM) !HostResult {
-            const source = vm.stringValue(args[0]);
-            var parsed = json.parseFromSlice(json.Value, vm.runtime.alloc, source, .{}) catch |err| {
-                return resultErr(vm, @errorName(err));
-            };
-            defer parsed.deinit();
+pub const Impl = struct {
+    pub fn encode(vm: *VM, data: Ts.any) !HostResult {
+        var out = std.Io.Writer.Allocating.init(vm.runtime.alloc);
+        defer out.deinit();
+        try writeJsonValue(data, vm, &out.writer);
+        const slice = try out.toOwnedSlice();
+        const result = try vm.adoptDataString(slice);
+        return HostResult.Ok(vm, result);
+    }
 
-            const value = try fromJsonValue(parsed.value, vm);
-            return root.resultTuple(vm, .ok, value);
-        }
-    }.a) },
+    pub fn decode(vm: *VM, source: Ts.string) !HostResult {
+        const str = vm.stringValue(@intFromEnum(source));
+        var parsed = json.parseFromSlice(json.Value, vm.runtime.alloc, str, .{}) catch |err| {
+            return HostResult.Err(vm, @errorName(err));
+        };
+        defer parsed.deinit();
+        const value = try fromJsonValue(parsed.value, vm);
+        return HostResult.Ok(vm, value);
+    }
 };
 
-fn resultErr(vm: *VM, message: []const u8) !HostResult {
-    return root.resultTuple(vm, .err, try vm.ownDataString(message));
-}
+pub const impls = root.impls(Impl).val;
 
 fn writeJsonValue(data: Data, vm: *VM, writer: *std.Io.Writer) anyerror!void {
     return switch (data.tag()) {

@@ -6,13 +6,13 @@ pub fn set_debug(args: []const Data, vm: *VM) !HostResult {
     vm.debug.each_instr = try check_field("instr", table, vm);
     vm.debug.each_stack = try check_field("stack", table, vm);
     vm.debug.trace = try check_field("trace", table, vm);
-    return std_lib.okAtom(vm);
+    return HostResult.coreAtom(.ok);
 }
 
 // get metatable
 pub fn get_meta(args: []const Data, vm: *VM) !HostResult {
     const mt = try vm.getMetatableId(args[0]);
-    return if (mt) |id| .{ .ok = Data.new.table(id) } else .{ .ok = revo.Data.new.core(.undef) };
+    return if (mt) |id| .data(Data.new.table(id)) else .data(revo.Data.new.core(.undef));
 }
 
 /// > set_meta(tbl: table, meta: table) -> table
@@ -28,7 +28,7 @@ pub fn set_meta(args: []const Data, vm: *VM) !HostResult {
     else
         return .errType(1, "nil atom or table", std_lib.typeof(args[1], vm));
     try vm.setMetatable(args[0], mt);
-    return .{ .ok = args[0] };
+    return .data(args[0]);
 }
 
 fn check_field(name: []const u8, table: *revo.table.Table, vm: *VM) !bool {

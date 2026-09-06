@@ -7,13 +7,112 @@ const api = @import("api.zig");
 const root = @import("root.zig");
 const HostResult = root.HostResult;
 
-pub const impls: []const api.Impl = &.{
-    .{ .name = "compile", .f = root.define(&.{.string}, compileFn) },
-    .{ .name = "is_match", .f = root.define(&.{ .any, .string }, isMatchFn) },
-    .{ .name = "find", .f = root.define(&.{ .any, .string }, findFn) },
-    .{ .name = "find_all", .f = root.define(&.{ .any, .string }, findAllFn) },
-    .{ .name = "free", .f = root.define(&.{.table}, freeFn) },
+const Ts = root.T;
+
+pub const Impl = struct {
+    pub fn compile(vm: *VM, pattern: Ts.string) !HostResult {
+        const pattern_str = try vm.runtime.alloc.dupe(u8, vm.stringValue(@intFromEnum(pattern)));
+        defer vm.runtime.alloc.free(pattern_str);
+
+        const regex = try vm.runtime.alloc.create(mvzr.Regex);
+        errdefer vm.runtime.alloc.destroy(regex);
+        regex.* = mvzr.compile(pattern_str) orelse {
+            vm.runtime.alloc.destroy(regex);
+            return .data(Data.new.nil());
+        };
+
+        const tid = try vm.tables.create();
+        const table = try vm.tables.get(tid);
+        try table.putRaw(try vm.dataAtom("_ptr"), Data.new.foreign(@ptrCast(regex)), vm);
+
+        try table.putRaw(try vm.dataAtom("_pattern"), Data.new.str(@intFromEnum(pattern)), vm);
+
+        const gc_fn_id = try vm.installHost("__regex_gc", .{
+            .arity = 1,
+            .param_types = &.{.table},
+            .func = gcFn,
+            .variadic = false,
+            .ret_type = .any,
+        });
+
+        try vm.registerFinalizer(tid, Data.new.function(gc_fn_id));
+
+        return .data(Data.new.table(tid));
+    }
+
+    pub fn is_match(vm: *VM, val: Ts.any, haystack: Ts.string) !HostResult {
+        const r = resolveRegex(val, vm) catch return ._bool(false);
+        const owned = r.owned;
+        defer if (owned) vm.runtime.alloc.destroy(r.regex);
+        const hay = vm.stringValue(@intFromEnum(haystack));
+        return ._bool(r.regex.isMatch(hay));
+    }
+
+    pub fn find(vm: *VM, val: Ts.any, haystack: Ts.string) !HostResult {
+        const r = resolveRegex(val, vm) catch return .data(Data.new.nil());
+        const owned = r.owned;
+        defer if (owned) vm.runtime.alloc.destroy(r.regex);
+        const hay = vm.stringValue(@intFromEnum(haystack));
+        if (r.regex.match(hay)) |m| {
+            return .data(try vm.ownDataString(m.slice));
+        }
+        return .data(Data.new.nil());
+    }
+
+    pub fn find_all(vm: *VM, val: Ts.any, haystack: Ts.string) !HostResult {
+        const r = resolveRegex(val, vm) catch return .data(Data.new.nil());
+
+        const it_id = try vm.tables.create();
+        const it = try vm.tables.get(it_id);
+
+        const atom_regex = try vm.internAtom("_ptr");
+        const atom_haystack = try vm.internAtom("haystack");
+        const atom_pos = try vm.internAtom("pos");
+
+        try it.putRaw(Data.new.atom(atom_regex), Data.new.foreign(@ptrCast(r.regex)), vm);
+        try it.putRaw(Data.new.atom(atom_haystack), Data.new.str(@intFromEnum(haystack)), vm);
+        try it.putRaw(Data.new.atom(atom_pos), Data.new.num(0), vm);
+
+        if (r.owned) {
+            const gc_fn_id = try vm.installHost("__regex_it_gc", .{
+                .arity = 1,
+                .param_types = &.{.table},
+                .func = itGcFn,
+                .variadic = false,
+                .ret_type = .any,
+            });
+            try vm.registerFinalizer(it_id, Data.new.function(gc_fn_id));
+        }
+
+        const next_fn_id = try vm.installHost("__regex_next", .{
+            .arity = 1,
+            .param_types = &.{.table},
+            .func = nextFn,
+            .variadic = false,
+            .ret_type = .any,
+        });
+        try it.putRaw(try vm.dataAtom("__call"), Data.new.function(next_fn_id), vm);
+
+        return .data(Data.new.table(it_id));
+    }
+
+    pub fn free(vm: *VM, tbl: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(tbl));
+
+        const ptr_val = table.getRaw(try vm.dataAtom("_ptr"), vm) orelse
+            return .data(Data.new.nil());
+        const regex_ptr = ptr_val.asForeign().?;
+        const regex: *mvzr.Regex = @ptrCast(@alignCast(regex_ptr));
+
+        _ = table.remove(try vm.dataAtom("_ptr"), vm);
+        vm.runtime.alloc.destroy(regex);
+        vm.unregisterFinalizer(@intFromEnum(tbl));
+
+        return .data(Data.new.nil());
+    }
 };
+
+pub const impls = root.impls(Impl).val;
 
 fn getRegexFromTable(val: Data, vm: *VM) !*mvzr.Regex {
     const tid = val.asTable().?;
@@ -48,131 +147,29 @@ fn resolveRegex(val: Data, vm: *VM) !ResolvedRegex {
     return error.InvalidRegex;
 }
 
-fn compileFn(args: []const Data, vm: *VM) !HostResult {
-    const pattern_str = try vm.runtime.alloc.dupe(u8, vm.stringValue(args[0].asString().?));
-    defer vm.runtime.alloc.free(pattern_str);
-
-    const regex = try vm.runtime.alloc.create(mvzr.Regex);
-    errdefer vm.runtime.alloc.destroy(regex);
-    regex.* = mvzr.compile(pattern_str) orelse {
-        vm.runtime.alloc.destroy(regex);
-        return .okData(Data.new.nil());
-    };
-
-    const tid = try vm.tables.create();
-    const table = try vm.tables.get(tid);
-    try table.putRaw(try vm.dataAtom("_ptr"), Data.new.foreign(@ptrCast(regex)), vm);
-
-    try table.putRaw(try vm.dataAtom("_pattern"), args[0], vm);
-
-    const gc_fn_id = try vm.installHost("__regex_gc", .{
-        .arity = 1,
-        .param_types = &.{.table},
-        .func = gcFn,
-        .variadic = false,
-        .ret_type = .any,
-    });
-
-    try vm.registerFinalizer(tid, Data.new.function(gc_fn_id));
-
-    return .okData(Data.new.table(tid));
-}
-
-fn isMatchFn(args: []const Data, vm: *VM) !HostResult {
-    const r = resolveRegex(args[0], vm) catch return .okData(Data.new.boolean(false));
-    const owned = r.owned;
-    defer if (owned) vm.runtime.alloc.destroy(r.regex);
-    const haystack = vm.stringValue(args[1].asString().?);
-    return .okData(Data.new.boolean(r.regex.isMatch(haystack)));
-}
-
-fn findFn(args: []const Data, vm: *VM) !HostResult {
-    const r = resolveRegex(args[0], vm) catch return .okData(Data.new.nil());
-    const owned = r.owned;
-    defer if (owned) vm.runtime.alloc.destroy(r.regex);
-    const haystack = vm.stringValue(args[1].asString().?);
-    if (r.regex.match(haystack)) |m| {
-        return .okData(try vm.ownDataString(m.slice));
-    }
-    return .okData(Data.new.nil());
-}
-
-fn findAllFn(args: []const Data, vm: *VM) !HostResult {
-    const r = resolveRegex(args[0], vm) catch return .okData(Data.new.nil());
-
-    const it_id = try vm.tables.create();
-    const it = try vm.tables.get(it_id);
-
-    const atom_regex = try vm.internAtom("_ptr");
-    const atom_haystack = try vm.internAtom("haystack");
-    const atom_pos = try vm.internAtom("pos");
-
-    try it.putRaw(Data.new.atom(atom_regex), Data.new.foreign(@ptrCast(r.regex)), vm);
-    try it.putRaw(Data.new.atom(atom_haystack), args[1], vm);
-    try it.putRaw(Data.new.atom(atom_pos), Data.new.num(0), vm);
-
-    if (r.owned) {
-        const gc_fn_id = try vm.installHost("__regex_it_gc", .{
-            .arity = 1,
-            .param_types = &.{.table},
-            .func = itGcFn,
-            .variadic = false,
-            .ret_type = .any,
-        });
-        try vm.registerFinalizer(it_id, Data.new.function(gc_fn_id));
-    }
-
-    const next_fn_id = try vm.installHost("__regex_next", .{
-        .arity = 1,
-        .param_types = &.{.table},
-        .func = nextFn,
-        .variadic = false,
-        .ret_type = .any,
-    });
-    try it.putRaw(try vm.dataAtom("__call"), Data.new.function(next_fn_id), vm);
-
-    return .okData(Data.new.table(it_id));
-}
-
-fn freeFn(args: []const Data, vm: *VM) !HostResult {
-    const tid = args[0].asTable().?;
-    const table = try vm.tables.get(tid);
-
-    const ptr_val = table.getRaw(try vm.dataAtom("_ptr"), vm) orelse
-        return .okData(Data.new.nil());
-    const regex_ptr = ptr_val.asForeign().?;
-    const regex: *mvzr.Regex = @ptrCast(@alignCast(regex_ptr));
-
-    _ = table.remove(try vm.dataAtom("_ptr"), vm);
-    vm.runtime.alloc.destroy(regex);
-    vm.unregisterFinalizer(tid);
-
-    return .okData(Data.new.nil());
-}
-
 fn itGcFn(args: []const Data, vm: *VM) !HostResult {
     const tid = args[0].asTable().?;
-    const table = vm.tables.get(tid) catch return .okData(Data.new.nil());
+    const table = vm.tables.get(tid) catch return .data(Data.new.nil());
     const atom_regex = try vm.internAtom("_ptr");
     const ptr_val = table.getRaw(Data.new.atom(atom_regex), vm) orelse
-        return .okData(Data.new.nil());
+        return .data(Data.new.nil());
     const regex_ptr = ptr_val.asForeign().?;
     const regex: *mvzr.Regex = @ptrCast(@alignCast(regex_ptr));
     _ = table.remove(Data.new.atom(atom_regex), vm);
     vm.runtime.alloc.destroy(regex);
-    return .okData(Data.new.nil());
+    return .data(Data.new.nil());
 }
 
 fn gcFn(args: []const Data, vm: *VM) !HostResult {
     const tid = args[0].asTable().?;
-    const table = vm.tables.get(tid) catch return .okData(Data.new.nil());
+    const table = vm.tables.get(tid) catch return .data(Data.new.nil());
     const ptr_val = table.getRaw(try vm.dataAtom("_ptr"), vm) orelse
-        return .okData(Data.new.nil());
+        return .data(Data.new.nil());
     const regex_ptr = ptr_val.asForeign().?;
     const regex: *mvzr.Regex = @ptrCast(@alignCast(regex_ptr));
     _ = table.remove(try vm.dataAtom("_ptr"), vm);
     vm.runtime.alloc.destroy(regex);
-    return .okData(Data.new.nil());
+    return .data(Data.new.nil());
 }
 
 fn nextFn(args: []const Data, vm: *VM) !HostResult {
@@ -184,18 +181,18 @@ fn nextFn(args: []const Data, vm: *VM) !HostResult {
     const atom_pos = try vm.internAtom("pos");
 
     const ptr_val = table.getRaw(Data.new.atom(atom_regex), vm) orelse
-        return .okData(Data.new.core(.done));
+        return .data(Data.new.core(.done));
     const haystack_val = table.getRaw(Data.new.atom(atom_haystack), vm) orelse
-        return .okData(Data.new.core(.done));
+        return .data(Data.new.core(.done));
     const pos_val = table.getRaw(Data.new.atom(atom_pos), vm) orelse
-        return .okData(Data.new.core(.done));
+        return .data(Data.new.core(.done));
 
     const regex: *mvzr.Regex = @ptrCast(@alignCast(ptr_val.asForeign().?));
     const haystack = vm.stringValue(haystack_val.asString().?);
     const pos: usize = root.numToInt(usize, pos_val.asNum().?) orelse
-        return .okData(Data.new.core(.done));
+        return .data(Data.new.core(.done));
 
-    if (pos > haystack.len) return .okData(Data.new.core(.done));
+    if (pos > haystack.len) return .data(Data.new.core(.done));
 
     const substack = haystack[pos..];
     if (regex.match(substack)) |m| {
@@ -212,8 +209,8 @@ fn nextFn(args: []const Data, vm: *VM) !HostResult {
         try match_t.putRaw(Data.new.atom(atom_end), Data.new.num(pos + m.end), vm);
         try match_t.putRaw(Data.new.atom(atom_match_key), try vm.ownDataString(m.slice), vm);
 
-        return .okData(Data.new.table(match_tid));
+        return .data(Data.new.table(match_tid));
     }
 
-    return .okData(Data.new.core(.done));
+    return .data(Data.new.core(.done));
 }

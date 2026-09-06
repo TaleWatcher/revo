@@ -1,11 +1,356 @@
-pub const impls: []const api.Impl = &.{
-    .{ .name = "connect", .f = if (@import("build_options").is_freestanding) root.defineStub(&.{ .string, .number }) else root.define(&.{ .string, .number }, connect_fn) },
-    .{ .name = "listen", .f = if (@import("build_options").is_freestanding) root.defineStubVariadic(&.{.number}) else root.defineVariadic(&.{.number}, listen_fn) },
-    .{ .name = "accept", .f = if (@import("build_options").is_freestanding) root.defineStub(&.{.table}) else root.define(&.{.table}, accept_fn) },
-    .{ .name = "send", .f = if (@import("build_options").is_freestanding) root.defineStub(&.{ .table, .string }) else root.define(&.{ .table, .string }, send_fn) },
-    .{ .name = "recv", .f = if (@import("build_options").is_freestanding) root.defineStub(&.{ .table, .table }) else root.define(&.{ .table, .table }, recv) },
-    .{ .name = "close", .f = if (@import("build_options").is_freestanding) root.defineStub(&.{.table}) else root.define(&.{.table}, socket_close_fn) },
+const Ts = root.T;
+
+pub const Impl = struct {
+    pub fn connect(vm: *VM, host: Ts.string, port: Ts.number) !HostResult {
+        const host_str = vm.stringValue(@intFromEnum(host));
+        const port_int: u16 = root.numToInt(u16, port) orelse
+            return .errType(1, "port num 0..65535", root.typeof(Data.new.num(port), vm));
+
+        const host_to_use = if (std.mem.eql(u8, host_str, "localhost")) "127.0.0.1" else host_str;
+        const addr = std.Io.net.IpAddress.parseIp4(host_to_use, port_int) catch |err| {
+            return HostResult.Err(vm, @errorName(err));
+        };
+
+        if (revo.has_async_backend) {
+            const ip4 = switch (addr) {
+                .ip4 => |a| a,
+                .ip6 => return HostResult.Err(vm, "AddressFamilyUnsupported"),
+            };
+            const addr_buf = try vm.runtime.alloc.alloc(u8, 6);
+            addr_buf[0] = ip4.bytes[0];
+            addr_buf[1] = ip4.bytes[1];
+            addr_buf[2] = ip4.bytes[2];
+            addr_buf[3] = ip4.bytes[3];
+            std.mem.writeInt(u16, addr_buf[4..6], ip4.port, .native);
+
+            const job = try vm.runtime.alloc.create(revo.async_backend.AsyncJob);
+            job.* = .{
+                .fiber_id = vm.sched.current_fiber,
+                .kind = revo.async_backend.AsyncJobKind.socket_connect,
+                .handle = -1,
+                .message_id = 0,
+                .offset = 0,
+                .buffer = addr_buf,
+                .max_bytes = 0,
+            };
+            _ = try revo.async_backend_impl.submit(
+                &vm.runtime.async_backend,
+                @ptrCast(vm),
+                job,
+            );
+            vm.sched.parkCurrent(.{ .io = .{ .wait_id = 0 } });
+            return .parked();
+        }
+
+        const stream = addr.connect(vm.runtime.io, .{
+            .mode = std.Io.net.Socket.Mode.stream,
+            .protocol = std.Io.net.Protocol.tcp,
+        }) catch |err| {
+            return HostResult.Err(vm, @errorName(err));
+        };
+
+        setSocketNonBlocking(stream.socket.handle) catch |err| {
+            stream.close(vm.runtime.io);
+            return HostResult.Err(vm, @errorName(err));
+        };
+
+        const entry_ptr = try vm.runtime.alloc.create(SocketEntry);
+        entry_ptr.* = .{ .stream = .{ .socket = stream } };
+
+        return HostResult.Ok(vm, try wrapSocket(vm, entry_ptr, false));
+    }
+
+    pub fn accept(vm: *VM, self: Ts.table) !HostResult {
+        if (builtin.target.os.tag == .windows) return error.OsNotSupported;
+        const socket_data = Data.new.table(@intFromEnum(self));
+
+        if (!try isServer(socket_data, vm)) return HostResult.Err(vm, "NotServerSocket");
+
+        const entry_ptr = try getEntryPtr(socket_data, vm);
+        const server = switch (entry_ptr.*) {
+            .server => |*s| s,
+            .stream => return HostResult.Err(vm, "NotServerSocket"),
+        };
+
+        if (revo.has_async_backend) {
+            const job = try vm.runtime.alloc.create(revo.async_backend.AsyncJob);
+            job.* = .{
+                .fiber_id = vm.sched.current_fiber,
+                .kind = revo.async_backend.AsyncJobKind.socket_accept,
+                .handle = server.socket.handle,
+                .message_id = 0,
+                .offset = 0,
+                .buffer = null,
+                .max_bytes = 0,
+            };
+            _ = try revo.async_backend_impl.submit(
+                &vm.runtime.async_backend,
+                @ptrCast(vm),
+                job,
+            );
+            vm.sched.parkCurrent(.{ .io = .{ .wait_id = @intCast(server.socket.handle) } });
+            return .parked();
+        }
+
+        const rc = std.c.accept(server.socket.handle, null, null);
+        switch (std.posix.errno(rc)) {
+            .AGAIN => {
+                try vm.sched.parkCurrentForIo(
+                    @intCast(server.socket.handle),
+                    .read,
+                    0,
+                    onAcceptReady,
+                    null,
+                );
+                return .parked();
+            },
+            .SUCCESS => {},
+            else => |err| return HostResult.Err(vm, @tagName(err)),
+        }
+        const handle: std.posix.fd_t = @intCast(rc);
+        setSocketNonBlocking(handle) catch |err| {
+            _ = std.c.close(handle);
+            return HostResult.Err(vm, @errorName(err));
+        };
+        const new_entry_ptr = try vm.runtime.alloc.create(SocketEntry);
+        new_entry_ptr.* = .{
+            .stream = .{
+                .socket = .{
+                    .socket = .{
+                        .handle = handle,
+                        .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } },
+                    },
+                },
+                .pending = &.{},
+            },
+        };
+        return HostResult.Ok(vm, try wrapSocket(vm, new_entry_ptr, false));
+    }
+
+    pub fn send(vm: *VM, self: Ts.table, data: Ts.string) !HostResult {
+        if (builtin.target.os.tag == .windows or builtin.target.os.tag == .wasi) return error.OsNotSupported;
+        const socket_data = Data.new.table(@intFromEnum(self));
+        const message = vm.stringValue(@intFromEnum(data));
+
+        if (try isServer(socket_data, vm)) return HostResult.Err(vm, "CannotSendOnServer");
+
+        const entry_ptr = try getEntryPtr(socket_data, vm);
+        const stream = switch (entry_ptr.*) {
+            .stream => |*s| s,
+            .server => return HostResult.Err(vm, "CannotSendOnServer"),
+        };
+
+        const handle = stream.socket.socket.handle;
+
+        if (revo.has_async_backend) {
+            const job = try vm.runtime.alloc.create(revo.async_backend.AsyncJob);
+            job.* = .{
+                .fiber_id = vm.sched.current_fiber,
+                .kind = revo.async_backend.AsyncJobKind.socket_send,
+                .handle = handle,
+                .message_id = @intFromEnum(data),
+                .offset = 0,
+                .buffer = null,
+                .max_bytes = 0,
+            };
+            _ = try revo.async_backend_impl.submit(
+                &vm.runtime.async_backend,
+                @ptrCast(vm),
+                job,
+            );
+            vm.sched.parkCurrent(.{ .io = .{ .wait_id = @intCast(handle) } });
+            return .parked();
+        }
+
+        const flags: u32 = std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL;
+        const rc = std.c.send(handle, message.ptr, message.len, flags);
+        switch (std.posix.errno(rc)) {
+            .AGAIN => {
+                const token_ptr = try vm.runtime.alloc.create(SendWaitToken);
+                token_ptr.* = .{ .message = @intFromEnum(data), .offset = 0 };
+                try vm.sched.parkCurrentForIo(
+                    @intCast(handle),
+                    .write,
+                    @intFromPtr(token_ptr),
+                    onSendReady,
+                    deinitSendToken,
+                );
+                return .parked();
+            },
+            .SUCCESS => {},
+            else => |err| return HostResult.Err(vm, @tagName(err)),
+        }
+        const sent: usize = @intCast(rc);
+        if (sent >= message.len) return HostResult.Ok(vm, Data.new.num(sent));
+        const token_ptr = try vm.runtime.alloc.create(SendWaitToken);
+        token_ptr.* = .{ .message = @intFromEnum(data), .offset = sent };
+        try vm.sched.parkCurrentForIo(
+            @intCast(handle),
+            .write,
+            @intFromPtr(token_ptr),
+            onSendReady,
+            deinitSendToken,
+        );
+        return .parked();
+    }
+
+    pub fn recv(vm: *VM, self: Ts.table, opts: Ts.table) !HostResult {
+        if (builtin.target.os.tag == .windows or builtin.target.os.tag == .wasi) return error.OsNotSupported;
+        const socket_data = Data.new.table(@intFromEnum(self));
+        const opts_data = Data.new.table(@intFromEnum(opts));
+
+        if (try isServer(socket_data, vm)) return HostResult.Err(vm, "CannotRecvOnServer");
+
+        const entry_ptr = try getEntryPtr(socket_data, vm);
+        const stream = switch (entry_ptr.*) {
+            .stream => |*s| s,
+            .server => return HostResult.Err(vm, "CannotRecvOnServer"),
+        };
+
+        var parsed = parseRecvOptions(opts_data, vm) catch return .errType(1, "recv opts table", root.typeof(opts_data, vm));
+        parsed.entry_ptr = entry_ptr;
+
+        const handle = stream.socket.socket.handle;
+        const flags: u32 = std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL;
+
+        switch (parsed.mode) {
+            .read_some => {
+                if (stream.pending.len > 0) {
+                    const take = @min(parsed.max_bytes, stream.pending.len);
+                    const payload = try vm.ownDataString(stream.pending[0..take]);
+                    if (take < stream.pending.len) {
+                        const rest = try vm.runtime.alloc.dupe(u8, stream.pending[take..]);
+                        if (stream.pending.len > 0) vm.runtime.alloc.free(stream.pending);
+                        stream.pending = rest;
+                    } else {
+                        if (stream.pending.len > 0) vm.runtime.alloc.free(stream.pending);
+                        stream.pending = &.{};
+                    }
+                    return HostResult.Ok(vm, payload);
+                }
+                const recv_buf = try vm.runtime.alloc.alloc(u8, parsed.max_bytes);
+                defer vm.runtime.alloc.free(recv_buf);
+                const rc = std.c.recv(handle, recv_buf.ptr, recv_buf.len, flags);
+                switch (std.posix.errno(rc)) {
+                    .AGAIN => {},
+                    .SUCCESS => {
+                        const n: usize = @intCast(rc);
+                        if (n == 0) return HostResult.Err(vm, "SocketClosed");
+                        return HostResult.Ok(vm, try vm.ownDataString(recv_buf[0..n]));
+                    },
+                    else => |err| return HostResult.Err(vm, @tagName(err)),
+                }
+            },
+            .read_line => {
+                if (try tryExtractPendingDelimited(vm, stream, parsed.delimiter)) |line| return HostResult.Ok(vm, line);
+                while (true) {
+                    const recv_buf = try vm.runtime.alloc.alloc(u8, parsed.max_bytes);
+                    defer vm.runtime.alloc.free(recv_buf);
+                    const rc = std.c.recv(handle, recv_buf.ptr, recv_buf.len, flags);
+                    switch (std.posix.errno(rc)) {
+                        .AGAIN => break,
+                        .SUCCESS => {},
+                        else => |err| return HostResult.Err(vm, @tagName(err)),
+                    }
+                    const n: usize = @intCast(rc);
+                    if (n == 0) {
+                        if (stream.pending.len > 0) {
+                            const payload = try vm.ownDataString(stream.pending);
+                            if (stream.pending.len > 0) vm.runtime.alloc.free(stream.pending);
+                            stream.pending = &.{};
+                            return HostResult.Ok(vm, payload);
+                        }
+                        return HostResult.Err(vm, "SocketClosed");
+                    }
+                    try appendPending(vm.runtime.alloc, stream, recv_buf[0..n]);
+                    if (try tryExtractPendingDelimited(vm, stream, parsed.delimiter)) |line| return HostResult.Ok(vm, line);
+                }
+            },
+            .read_all => {
+                while (true) {
+                    const recv_buf = try vm.runtime.alloc.alloc(u8, parsed.max_bytes);
+                    defer vm.runtime.alloc.free(recv_buf);
+                    const rc = std.c.recv(handle, recv_buf.ptr, recv_buf.len, flags);
+                    switch (std.posix.errno(rc)) {
+                        .AGAIN => break,
+                        .SUCCESS => {},
+                        else => |err| return HostResult.Err(vm, @tagName(err)),
+                    }
+                    const n: usize = @intCast(rc);
+                    if (n == 0) {
+                        if (stream.pending.len > 0) {
+                            const payload = try vm.ownDataString(stream.pending);
+                            if (stream.pending.len > 0) vm.runtime.alloc.free(stream.pending);
+                            stream.pending = &.{};
+                            return HostResult.Ok(vm, payload);
+                        }
+                        return HostResult.Err(vm, "SocketClosed");
+                    }
+                    try appendPending(vm.runtime.alloc, stream, recv_buf[0..n]);
+                }
+            },
+        }
+
+        const token_ptr = try vm.runtime.alloc.create(RecvWaitToken);
+        token_ptr.* = parsed;
+        try vm.sched.parkCurrentForIo(
+            @intCast(handle),
+            .read,
+            @intFromPtr(token_ptr),
+            onRecvReady,
+            deinitRecvToken,
+        );
+        return .parked();
+    }
+
+    pub fn close(vm: *VM, self: Ts.table) !HostResult {
+        const socket_data = Data.new.table(@intFromEnum(self));
+        try closeEntry(socket_data, vm);
+        return HostResult.Ok(vm, revo.Data.new.core(.nil));
+    }
 };
+
+pub const impls: []const api.Impl = if (@import("build_options").is_freestanding)
+    &[_]api.Impl{}
+else
+    root.impls(Impl).val ++ &[_]api.Impl{
+        .{ .name = "listen", .f = root.defineVariadic(&.{.number}, listen_fn) },
+    };
+
+/// > net:listen(port: num [, backlog: num]) -> socket
+fn listen_fn(args: []const Data, vm: *VM) !HostResult {
+    const port: u16 = root.numToInt(u16, args[0].asNum().?) orelse
+        return .errType(0, "port num 0..65535", root.typeof(args[0], vm));
+    const backlog: u31 = if (args.len > 1)
+        root.numToInt(u31, args[1].asNum().?) orelse return .errType(1, "backlog num", root.typeof(args[1], vm))
+    else
+        128;
+
+    const addr = std.Io.net.IpAddress.parseIp4("0.0.0.0", port) catch |err| {
+        return HostResult.Err(vm, @errorName(err));
+    };
+
+    var server = addr.listen(vm.runtime.io, .{
+        .mode = std.Io.net.Socket.Mode.stream,
+        .protocol = std.Io.net.Protocol.tcp,
+        .kernel_backlog = backlog,
+        .reuse_address = true,
+    }) catch |err| {
+        return HostResult.Err(vm, @errorName(err));
+    };
+
+    setSocketNonBlocking(server.socket.handle) catch |err| {
+        std.Io.net.Server.deinit(&server, vm.runtime.io);
+        return HostResult.Err(vm, @errorName(err));
+    };
+
+    const entry_ptr = try vm.runtime.alloc.create(SocketEntry);
+    entry_ptr.* = .{ .server = server };
+
+    return HostResult.Ok(vm, try wrapSocket(vm, entry_ptr, true));
+}
+
+// -- internal helpers (unchanged) --
 
 pub const SocketEntry = union(enum) {
     stream: StreamEntry,
@@ -46,7 +391,6 @@ pub fn setSocketNonBlocking(handle: std.posix.fd_t) !void {
     if (rc == -1) return error.Unexpected;
 }
 
-// wake a fiber with a (tag, payload) tuple
 fn wakeFiber(vm: *VM, fiber_id: VM.FiberID, tag: revo.core_atoms, payload: Data) !void {
     const items = [_]Data{
         Data.new.atom(@intFromEnum(tag)),
@@ -247,7 +591,6 @@ fn onAcceptReady(vm: *VM, waiter: *Scheduler.WaitEntry, _: i16) !Scheduler.IoDis
     return try completeWaiter(vm, waiter, .ok, try wrapSocket(vm, new_entry_ptr, false));
 }
 
-// poll io waiters, poll and wake fibers
 pub fn pollIoWaiters(vm: *VM, timeout_ms: i32) !bool {
     if (builtin.target.os.tag == .windows) {
         return false;
@@ -300,7 +643,6 @@ pub fn pollIoWaiters(vm: *VM, timeout_ms: i32) !bool {
         woke_any = woke_any or dispatch.woke;
     }
 
-    // remove completions after the poll pass so swapremove can't shift live indices
     while (completed_waiters.items.len > 0) {
         var best_pos: usize = 0;
         var best_waiter: usize = completed_waiters.items[0];
@@ -318,7 +660,6 @@ pub fn pollIoWaiters(vm: *VM, timeout_ms: i32) !bool {
     return woke_any;
 }
 
-// ret table wraps heap alloced SocketEntry gc probably doesnt nuke it
 pub fn wrapSocket(vm: *VM, entry_ptr: *SocketEntry, is_server: bool) !Data {
     const sock_table = try vm.tables.create();
     var table = try vm.tables.get(sock_table);
@@ -335,14 +676,13 @@ pub fn wrapSocket(vm: *VM, entry_ptr: *SocketEntry, is_server: bool) !Data {
         try table.putRawAtom(revo.core_atoms.port.atomId(), Data.new.num(port), vm);
     }
 
-    // the socket module as mt __index so methods resolve
     const metatable = try vm.tables.create();
     var mt = try vm.tables.get(metatable);
     const socket_module_data = vm.globals.get(revo.core_atoms.socket.atomId()) orelse
         return error.SocketModuleNotFound;
 
     const socket_module = try vm.tables.get(socket_module_data.asTable().?);
-    const close_fn = socket_module.getRaw(try vm.dataAtom("close"), vm) orelse
+    const close_fn_data = socket_module.getRaw(try vm.dataAtom("close"), vm) orelse
         return error.SocketModuleNotFound;
 
     try mt.putRawAtom(revo.core_atoms.__index.atomId(), socket_module_data, vm);
@@ -351,10 +691,7 @@ pub fn wrapSocket(vm: *VM, entry_ptr: *SocketEntry, is_server: bool) !Data {
     const set_result = try meta.set_meta(&mt_array, vm);
     if (set_result != .ok) return error.SetMetatableFailed;
 
-    // socket handles own an os resource, keep the finalizer attached to the
-    // handle table so abandoned peers/listeners are closed during gc and vm
-    // shutdown, even when user code exits through an error path
-    try vm.registerFinalizer(sock_table, close_fn);
+    try vm.registerFinalizer(sock_table, close_fn_data);
 
     return Data.new.table(sock_table);
 }
@@ -366,7 +703,6 @@ fn isServer(socket_data: Data, vm: *VM) !bool {
     return !revo.isFalse(d);
 }
 
-/// ret always live ptr or SocketClosed
 fn getEntryPtr(socket_data: Data, vm: *VM) !*SocketEntry {
     const table = try vm.tables.get(socket_data.asTable().?);
     const d = table.getRawAtom(revo.core_atoms.__entry_ptr.atomId(), vm) orelse
@@ -383,9 +719,6 @@ fn fdId(fd: std.posix.fd_t) u64 {
     };
 }
 
-/// complete and remove io waiters parked on `fd` before the socket entry and
-/// fd are released, the poll loop would otherwise dispatch on_ready against
-/// the freed SocketEntry (or a reused fd) for any revents the closed fd gets
 fn cancelWaitersFor(vm: *VM, fd: std.posix.fd_t) !void {
     var idx = vm.sched.io_waiters.items.len;
     while (idx > 0) {
@@ -398,7 +731,6 @@ fn cancelWaitersFor(vm: *VM, fd: std.posix.fd_t) !void {
     }
 }
 
-/// poison the pointer slot and free the entry, idempotent
 fn closeEntry(socket_data: Data, vm: *VM) !void {
     const entry_ptr = getEntryPtr(socket_data, vm) catch |e| switch (e) {
         error.SocketClosed => return,
@@ -421,246 +753,9 @@ fn closeEntry(socket_data: Data, vm: *VM) !void {
     }
     vm.runtime.alloc.destroy(entry_ptr);
 
-    // zeroise so double close is nop rather than use-after-free
     var tbl = try vm.tables.get(socket_data.asTable().?);
     try tbl.putRawAtom(revo.core_atoms.__entry_ptr.atomId(), Data.new.num(0), vm);
     vm.unregisterFinalizer(socket_data.asTable().?);
-}
-
-/// > net:connect(host: string, port: num) -> socket
-/// connects to a remote host and port, returns a socket handle
-fn connect_fn(args: []const Data, vm: *VM) !HostResult {
-    const host = vm.stringValue(args[0].asString().?);
-    const port: u16 = root.numToInt(u16, args[1].asNum().?) orelse
-        return .errType(1, "port num 0..65535", root.typeof(args[1], vm));
-
-    const host_to_use = if (std.mem.eql(u8, host, "localhost")) "127.0.0.1" else host;
-    const addr = std.Io.net.IpAddress.parseIp4(host_to_use, port) catch |err| {
-        return try root.resultTuple(vm, .err, try vm.dataAtom(@errorName(err)));
-    };
-
-    if (revo.has_async_backend) {
-        // encode 4 ip octets + port, the worker builds the sockaddr
-        const ip4 = switch (addr) {
-            .ip4 => |a| a,
-            .ip6 => return try root.resultTuple(vm, .err, try vm.dataAtom("AddressFamilyUnsupported")),
-        };
-        const addr_buf = try vm.runtime.alloc.alloc(u8, 6);
-        addr_buf[0] = ip4.bytes[0];
-        addr_buf[1] = ip4.bytes[1];
-        addr_buf[2] = ip4.bytes[2];
-        addr_buf[3] = ip4.bytes[3];
-        std.mem.writeInt(u16, addr_buf[4..6], ip4.port, .native);
-
-        const job = try vm.runtime.alloc.create(revo.async_backend.AsyncJob);
-        job.* = .{
-            .fiber_id = vm.sched.current_fiber,
-            .kind = revo.async_backend.AsyncJobKind.socket_connect,
-            .handle = -1,
-            .message_id = 0,
-            .offset = 0,
-            .buffer = addr_buf,
-            .max_bytes = 0,
-        };
-        _ = try revo.async_backend_impl.submit(
-            &vm.runtime.async_backend,
-            @ptrCast(vm),
-            job,
-        );
-        vm.sched.parkCurrent(.{ .io = .{ .wait_id = 0 } });
-        return .parked();
-    }
-
-    const stream = addr.connect(vm.runtime.io, .{
-        .mode = std.Io.net.Socket.Mode.stream,
-        .protocol = std.Io.net.Protocol.tcp,
-    }) catch |err| {
-        return try root.resultTuple(vm, .err, try vm.dataAtom(@errorName(err)));
-    };
-
-    setSocketNonBlocking(stream.socket.handle) catch |err| {
-        stream.close(vm.runtime.io);
-        return try root.resultTuple(vm, .err, try vm.dataAtom(@errorName(err)));
-    };
-
-    const entry_ptr = try vm.runtime.alloc.create(SocketEntry);
-    entry_ptr.* = .{ .stream = .{ .socket = stream } };
-
-    return try .Ok(vm, try wrapSocket(vm, entry_ptr, false));
-}
-
-/// > net:listen(port: num [, backlog: num]) -> socket
-/// listens for incoming connections on the given port, returns server socket
-fn listen_fn(args: []const Data, vm: *VM) !HostResult {
-    const port: u16 = root.numToInt(u16, args[0].asNum().?) orelse
-        return .errType(0, "port num 0..65535", root.typeof(args[0], vm));
-    const backlog: u31 = if (args.len > 1)
-        root.numToInt(u31, args[1].asNum().?) orelse return .errType(1, "backlog num", root.typeof(args[1], vm))
-    else
-        128;
-
-    const addr = std.Io.net.IpAddress.parseIp4("0.0.0.0", port) catch |err| {
-        return try root.resultTuple(vm, .err, try vm.dataAtom(@errorName(err)));
-    };
-
-    var server = addr.listen(vm.runtime.io, .{
-        .mode = std.Io.net.Socket.Mode.stream,
-        .protocol = std.Io.net.Protocol.tcp,
-        .kernel_backlog = backlog,
-        .reuse_address = true,
-    }) catch |err| {
-        return try root.resultTuple(vm, .err, try vm.dataAtom(@errorName(err)));
-    };
-
-    setSocketNonBlocking(server.socket.handle) catch |err| {
-        std.Io.net.Server.deinit(&server, vm.runtime.io);
-        return try root.resultTuple(vm, .err, try vm.dataAtom(@errorName(err)));
-    };
-
-    const entry_ptr = try vm.runtime.alloc.create(SocketEntry);
-    entry_ptr.* = .{ .server = server };
-
-    return try .Ok(vm, try wrapSocket(vm, entry_ptr, true));
-}
-
-/// > socket:accept() -> socket
-/// accepts an incoming client connection on a server socket
-fn accept_fn(args: []const Data, vm: *VM) !HostResult {
-    if (builtin.target.os.tag == .windows) return error.OsNotSupported;
-    const socket_data = Data.new.table(args[0].asTable().?);
-
-    if (!try isServer(socket_data, vm)) return try root.resultTuple(vm, .err, revo.Data.new.core(.NotServerSocket));
-
-    const entry_ptr = try getEntryPtr(socket_data, vm);
-    const server = switch (entry_ptr.*) {
-        .server => |*s| s,
-        .stream => return try root.resultTuple(vm, .err, revo.Data.new.core(.NotServerSocket)),
-    };
-
-    if (revo.has_async_backend) {
-        // allocate job and submit to backend; backend owns job afterwards
-        const job = try vm.runtime.alloc.create(revo.async_backend.AsyncJob);
-        job.* = .{
-            .fiber_id = vm.sched.current_fiber,
-            .kind = revo.async_backend.AsyncJobKind.socket_accept,
-            .handle = server.socket.handle,
-            .message_id = 0,
-            .offset = 0,
-            .buffer = null,
-            .max_bytes = 0,
-        };
-        _ = try revo.async_backend_impl.submit(
-            &vm.runtime.async_backend,
-            @ptrCast(vm),
-            job,
-        );
-        // park current fiber; backend must wake it
-        vm.sched.parkCurrent(.{ .io = .{ .wait_id = @intCast(server.socket.handle) } });
-        return .parked();
-    }
-
-    const rc = std.c.accept(server.socket.handle, null, null);
-    switch (std.posix.errno(rc)) {
-        .AGAIN => {
-            try vm.sched.parkCurrentForIo(
-                @intCast(server.socket.handle),
-                .read,
-                0,
-                onAcceptReady,
-                null,
-            );
-            return .parked();
-        },
-        .SUCCESS => {},
-        else => |err| return try root.resultTuple(vm, .err, try vm.dataAtom(@tagName(err))),
-    }
-    const handle: std.posix.fd_t = @intCast(rc);
-    setSocketNonBlocking(handle) catch |err| {
-        _ = std.c.close(handle);
-        return try root.resultTuple(vm, .err, try vm.dataAtom(@errorName(err)));
-    };
-    const new_entry_ptr = try vm.runtime.alloc.create(SocketEntry);
-    new_entry_ptr.* = .{
-        .stream = .{
-            .socket = .{
-                .socket = .{
-                    .handle = handle,
-                    .address = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 0 } },
-                },
-            },
-            .pending = &.{},
-        },
-    };
-    return try .Ok(vm, try wrapSocket(vm, new_entry_ptr, false));
-}
-
-/// > socket:send(data: string) -> num
-/// sends data over the socket, returns num of bytes sent
-fn send_fn(args: []const Data, vm: *VM) !HostResult {
-    if (builtin.target.os.tag == .windows or builtin.target.os.tag == .wasi) return error.OsNotSupported;
-    const socket_data = Data.new.table(args[0].asTable().?);
-    const message = vm.stringValue(args[1].asString().?);
-
-    if (try isServer(socket_data, vm)) return try root.resultTuple(vm, .err, revo.Data.new.core(.CannotSendOnServer));
-
-    const entry_ptr = try getEntryPtr(socket_data, vm);
-    const stream = switch (entry_ptr.*) {
-        .stream => |*s| s,
-        .server => return try root.resultTuple(vm, .err, revo.Data.new.core(.CannotSendOnServer)),
-    };
-
-    const handle = stream.socket.socket.handle;
-
-    if (revo.has_async_backend) {
-        const job = try vm.runtime.alloc.create(revo.async_backend.AsyncJob);
-        job.* = .{
-            .fiber_id = vm.sched.current_fiber,
-            .kind = revo.async_backend.AsyncJobKind.socket_send,
-            .handle = handle,
-            .message_id = args[1].asString().?, // store StringID as usize
-            .offset = 0,
-            .buffer = null,
-            .max_bytes = 0,
-        };
-        _ = try revo.async_backend_impl.submit(
-            &vm.runtime.async_backend,
-            @ptrCast(vm),
-            job,
-        );
-        vm.sched.parkCurrent(.{ .io = .{ .wait_id = @intCast(handle) } });
-        return .parked();
-    }
-
-    const flags: u32 = std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL;
-    const rc = std.c.send(handle, message.ptr, message.len, flags);
-    switch (std.posix.errno(rc)) {
-        .AGAIN => {
-            const token_ptr = try vm.runtime.alloc.create(SendWaitToken);
-            token_ptr.* = .{ .message = args[1].asString().?, .offset = 0 };
-            try vm.sched.parkCurrentForIo(
-                @intCast(handle),
-                .write,
-                @intFromPtr(token_ptr),
-                onSendReady,
-                deinitSendToken,
-            );
-            return .parked();
-        },
-        .SUCCESS => {},
-        else => |err| return try root.resultTuple(vm, .err, try vm.dataAtom(@tagName(err))),
-    }
-    const sent: usize = @intCast(rc);
-    if (sent >= message.len) return try .Ok(vm, Data.new.num(sent));
-    const token_ptr = try vm.runtime.alloc.create(SendWaitToken);
-    token_ptr.* = .{ .message = args[1].asString().?, .offset = sent };
-    try vm.sched.parkCurrentForIo(
-        @intCast(handle),
-        .write,
-        @intFromPtr(token_ptr),
-        onSendReady,
-        deinitSendToken,
-    );
-    return .parked();
 }
 
 fn parseRecvOptions(opts_data: Data, vm: *VM) !RecvWaitToken {
@@ -695,125 +790,6 @@ fn parseRecvOptions(opts_data: Data, vm: *VM) !RecvWaitToken {
     }
 
     return token;
-}
-
-/// > socket:recv(opts: table) -> string
-/// receives data according to opts.mode (:read_some | :read_all | :read_line)
-fn recv(args: []const Data, vm: *VM) !HostResult {
-    if (builtin.target.os.tag == .windows or builtin.target.os.tag == .wasi) return error.OsNotSupported;
-    const socket_data = Data.new.table(args[0].asTable().?);
-    const opts_data = args[1];
-
-    if (try isServer(socket_data, vm)) return try root.resultTuple(vm, .err, revo.Data.new.core(.CannotRecvOnServer));
-
-    const entry_ptr = try getEntryPtr(socket_data, vm);
-    const stream = switch (entry_ptr.*) {
-        .stream => |*s| s,
-        .server => return try root.resultTuple(vm, .err, revo.Data.new.core(.CannotRecvOnServer)),
-    };
-
-    var parsed = parseRecvOptions(opts_data, vm) catch return .errType(1, "recv opts table", root.typeof(opts_data, vm));
-    parsed.entry_ptr = entry_ptr;
-
-    const handle = stream.socket.socket.handle;
-    const flags: u32 = std.posix.MSG.DONTWAIT | std.posix.MSG.NOSIGNAL;
-
-    switch (parsed.mode) {
-        .read_some => {
-            if (stream.pending.len > 0) {
-                const take = @min(parsed.max_bytes, stream.pending.len);
-                const payload = try vm.ownDataString(stream.pending[0..take]);
-                if (take < stream.pending.len) {
-                    const rest = try vm.runtime.alloc.dupe(u8, stream.pending[take..]);
-                    if (stream.pending.len > 0) vm.runtime.alloc.free(stream.pending);
-                    stream.pending = rest;
-                } else {
-                    if (stream.pending.len > 0) vm.runtime.alloc.free(stream.pending);
-                    stream.pending = &.{};
-                }
-                return try .Ok(vm, payload);
-            }
-            const recv_buf = try vm.runtime.alloc.alloc(u8, parsed.max_bytes);
-            defer vm.runtime.alloc.free(recv_buf);
-            const rc = std.c.recv(handle, recv_buf.ptr, recv_buf.len, flags);
-            switch (std.posix.errno(rc)) {
-                .AGAIN => {},
-                .SUCCESS => {
-                    const n: usize = @intCast(rc);
-                    if (n == 0) return try root.resultTuple(vm, .err, revo.Data.new.core(.SocketClosed));
-                    return try .Ok(vm, try vm.ownDataString(recv_buf[0..n]));
-                },
-                else => |err| return try root.resultTuple(vm, .err, try vm.dataAtom(@tagName(err))),
-            }
-        },
-        .read_line => {
-            if (try tryExtractPendingDelimited(vm, stream, parsed.delimiter)) |line| return try .Ok(vm, line);
-            while (true) {
-                const recv_buf = try vm.runtime.alloc.alloc(u8, parsed.max_bytes);
-                defer vm.runtime.alloc.free(recv_buf);
-                const rc = std.c.recv(handle, recv_buf.ptr, recv_buf.len, flags);
-                switch (std.posix.errno(rc)) {
-                    .AGAIN => break,
-                    .SUCCESS => {},
-                    else => |err| return try root.resultTuple(vm, .err, try vm.dataAtom(@tagName(err))),
-                }
-                const n: usize = @intCast(rc);
-                if (n == 0) {
-                    if (stream.pending.len > 0) {
-                        const payload = try vm.ownDataString(stream.pending);
-                        if (stream.pending.len > 0) vm.runtime.alloc.free(stream.pending);
-                        stream.pending = &.{};
-                        return try .Ok(vm, payload);
-                    }
-                    return try root.resultTuple(vm, .err, revo.Data.new.core(.SocketClosed));
-                }
-                try appendPending(vm.runtime.alloc, stream, recv_buf[0..n]);
-                if (try tryExtractPendingDelimited(vm, stream, parsed.delimiter)) |line| return try .Ok(vm, line);
-            }
-        },
-        .read_all => {
-            while (true) {
-                const recv_buf = try vm.runtime.alloc.alloc(u8, parsed.max_bytes);
-                defer vm.runtime.alloc.free(recv_buf);
-                const rc = std.c.recv(handle, recv_buf.ptr, recv_buf.len, flags);
-                switch (std.posix.errno(rc)) {
-                    .AGAIN => break,
-                    .SUCCESS => {},
-                    else => |err| return try root.resultTuple(vm, .err, try vm.dataAtom(@tagName(err))),
-                }
-                const n: usize = @intCast(rc);
-                if (n == 0) {
-                    if (stream.pending.len > 0) {
-                        const payload = try vm.ownDataString(stream.pending);
-                        if (stream.pending.len > 0) vm.runtime.alloc.free(stream.pending);
-                        stream.pending = &.{};
-                        return try .Ok(vm, payload);
-                    }
-                    return try root.resultTuple(vm, .err, revo.Data.new.core(.SocketClosed));
-                }
-                try appendPending(vm.runtime.alloc, stream, recv_buf[0..n]);
-            }
-        },
-    }
-
-    const token_ptr = try vm.runtime.alloc.create(RecvWaitToken);
-    token_ptr.* = parsed;
-    try vm.sched.parkCurrentForIo(
-        @intCast(handle),
-        .read,
-        @intFromPtr(token_ptr),
-        onRecvReady,
-        deinitRecvToken,
-    );
-    return .parked();
-}
-
-/// > socket:close() -> atom
-/// closes the socket
-fn socket_close_fn(args: []const Data, vm: *VM) !HostResult {
-    const socket_data = Data.new.table(args[0].asTable().?);
-    try closeEntry(socket_data, vm);
-    return try .Ok(vm, revo.Data.new.core(.nil));
 }
 
 const std = @import("std");
