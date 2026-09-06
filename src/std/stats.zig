@@ -3,6 +3,7 @@ const revo = @import("revo");
 const api = @import("api.zig");
 const root = @import("root.zig");
 // const pool = @import("pool.zig");
+const Ts = root.T;
 
 const typeof = root.typeof;
 const memory = revo.memory;
@@ -14,48 +15,48 @@ const Component = std.Uri.Component;
 const Table = revo.table.Table;
 const testing = revo.lang.testing;
 
-pub const impls: []const api.Impl = &.{
-    .{ .name = "frequencies", .f = root.define(&.{.table}, frequencies) },
-    // .{ .name = "mean", .f = root.define(&.{.table}, mean) },
-    // .{ .name = "fmean", .f = root.define(&.{ .table }, fmean) },
-    // .{ .name = "geometric_mean", .f = root.define(&.{ .table }, geometric_mean) },
-    // .{ .name = "harmonic_mean", .f = root.defineVariadic(&.{.table}, harmonic_mean) },
-    // .{ .name = "median", .f = root.define(&.{.table}, median) },
-    // .{ .name = "median_low", .f = root.define(&.{ .table }, median_low) },
-    // .{ .name = "median_high", .f = root.define(&.{ .table }, median_high) },
-    // .{ .name = "median_grouped", .f = root.define(&.{.table}, median_grouped) },
-    // .{ .name = "mode", .f = root.define(&.{.table}, mode) },
-    // .{ .name = "multimode", .f = root.define(&.{ .table }, multimode) },
-    // .{ .name = "quantiles", .f = root.define(&.{.table}, quantiles) },
-    // .{ .name = "stdev", .f = root.define(&.{ .table }, stdev) },
-    // .{ .name = "variance", .f = root.define(&.{.table}, variance) },
-    // .{ .name = "covariance", .f = root.define(&.{ .table }, covariance) },
-    // .{ .name = "correlation", .f = root.define(&.{.table}, correlation) },
-    // .{ .name = "linear_regression", .f = root.define(&.{.table}, linear_regression) },
+pub const Impl = struct {
+    /// > stats:frequencies() -> table<any>
+    /// returns a histogram of element frequencies as table (ele: freq)
+    pub fn frequencies(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+
+        const result_table_id = try vm.tables.create();
+        const result = try vm.tables.get(result_table_id);
+
+        var this_count: f64 = undefined;
+        for (table.array.items) |ele| {
+            if (try result.get(ele, vm)) |this_count_data| {
+                this_count = this_count_data.asNum().?;
+                try result.put(result_table_id, vm, ele, Data.new.num(this_count + 1));
+            } else {
+                try result.put(result_table_id, vm, ele, Data.new.num(1));
+            }
+        }
+
+        return .data(Data.new.table(result_table_id));
+    }
 };
 
-/// > stats:frequencies() -> table<any>
-/// returns a histogram of element frequencies as table (ele: freq)
-fn frequencies(args: []const Data, vm: *VM) !HostResult {
-    if (args.len != 1) return .errArity(args.len, 1);
-    const table_id = args[0].asTable() orelse return .errType(0, "table", typeof(args[0], vm));
-    const table = try vm.tables.get(table_id);
-
-    const result_table_id = try vm.tables.create();
-    const result = try vm.tables.get(result_table_id);
-
-    var this_count: f64 = undefined;
-    for (table.array.items) |ele| {
-        if (try result.get(ele, vm)) |this_count_data| {
-            this_count = this_count_data.asNum().?;
-            try result.put(result_table_id, vm, ele, Data.new.num(this_count + 1));
-        } else {
-            try result.put(result_table_id, vm, ele, Data.new.num(1));
-        }
-    }
-
-    return .data(Data.new.table(result_table_id));
-}
+pub const impls: []const api.Impl = root.impls(Impl).val;
+// ++ &.{
+// .{ .name = "mean", .f = root.define(&.{.table}, mean) },
+// .{ .name = "fmean", .f = root.define(&.{ .table }, fmean) },
+// .{ .name = "geometric_mean", .f = root.define(&.{ .table }, geometric_mean) },
+// .{ .name = "harmonic_mean", .f = root.defineVariadic(&.{.table}, harmonic_mean) },
+// .{ .name = "median", .f = root.define(&.{.table}, median) },
+// .{ .name = "median_low", .f = root.define(&.{ .table }, median_low) },
+// .{ .name = "median_high", .f = root.define(&.{ .table }, median_high) },
+// .{ .name = "median_grouped", .f = root.define(&.{.table}, median_grouped) },
+// .{ .name = "mode", .f = root.define(&.{.table}, mode) },
+// .{ .name = "multimode", .f = root.define(&.{ .table }, multimode) },
+// .{ .name = "quantiles", .f = root.define(&.{.table}, quantiles) },
+// .{ .name = "stdev", .f = root.define(&.{ .table }, stdev) },
+// .{ .name = "variance", .f = root.define(&.{.table}, variance) },
+// .{ .name = "covariance", .f = root.define(&.{ .table }, covariance) },
+// .{ .name = "correlation", .f = root.define(&.{.table}, correlation) },
+// .{ .name = "linear_regression", .f = root.define(&.{.table}, linear_regression) },
+// };
 
 test "stats methods" {
     try testing.topTrue("{1, 1, 1, 2, 3, 3} |> stats.frequencies() == {1=3, 2=1, 3=2}");

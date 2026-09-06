@@ -135,7 +135,10 @@ pub fn loadAllSpecs(_: std.mem.Allocator) ![]const []const FnSpec {
             if (i > 0) for (specs[0..i]) |other| {
                 if (std.mem.eql(u8, other.name, s.name)) k += 1;
             };
-            s.f = implFor(ig.impls, s.name, k) orelse return error.StdlibImplMissing;
+            s.f = implFor(ig.impls, s.name, k) orelse {
+                std.debug.print("missing {s}\n", .{s.name});
+                @panic("missing an std def");
+            };
         }
         for (ig.impls) |imp| {
             if (findIn(specs, imp.name) == null) return error.StdlibImplUnused;
