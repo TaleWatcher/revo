@@ -238,6 +238,8 @@ pub const FnSpec = struct {
     /// when set, the metatable key is this core atom (e.g. `__index`)
     /// instead of `internAtom(name)`. only `__index` uses it today
     core_key: ?revo.core_atoms = null,
+    /// default values for optional params (parallel to params, nullis no default)
+    default_values: []const ?*ast.Node = &.{},
     f: HostFunc,
 
     /// release one spec's owned strings, not the spec struct itself
@@ -248,9 +250,12 @@ pub const FnSpec = struct {
             alloc.free(p[0]);
             alloc.free(p[1]);
         }
+
         alloc.free(self.params);
         alloc.free(self.ret);
         alloc.free(self.doc);
+        if (self.default_values.len > 0) alloc.free(self.default_values);
+
         for (self.fields) |fl| {
             alloc.free(fl.name);
             alloc.free(fl.type_text);
@@ -497,9 +502,14 @@ pub fn specFromFn(
 ) !FnSpec {
     var params = try std.ArrayList(Param).initCapacity(alloc, params_in.len);
     errdefer params.deinit(alloc);
+
+    var defaults = try std.ArrayList(?*ast.Node).initCapacity(alloc, params_in.len);
+    errdefer defaults.deinit(alloc);
+
     var variadic = false;
     var rendered = std.ArrayList(u8).empty;
     defer rendered.deinit(alloc);
+
     for (params_in) |p| {
         rendered.clearRetainingCapacity();
         if (p.type_name) |tn| {
@@ -513,7 +523,9 @@ pub fn specFromFn(
             try rendered.append(alloc, '.');
             try rendered.append(alloc, '.');
         }
+
         try params.append(alloc, .{ try alloc.dupe(u8, p.name), try alloc.dupe(u8, rendered.items) });
+        try defaults.append(alloc, p.default_value);
     }
 
     var args = std.ArrayList(u8).empty;
@@ -562,6 +574,7 @@ pub fn specFromFn(
         .doc = try alloc.dupe(u8, std.mem.trimEnd(u8, doc_buf.items, "\n")),
         .variadic = variadic,
         .core_key = core_key,
+        .default_values = try defaults.toOwnedSlice(alloc),
         .f = undefined,
     };
 }

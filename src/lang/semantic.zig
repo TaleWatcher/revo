@@ -522,16 +522,21 @@ const SemanticChecker = struct {
         const saved = self.current_type_params;
         self.current_type_params = type_params;
         defer self.current_type_params = saved;
+
         var param_types = try std.ArrayList(types_mod.TypeInfo).initCapacity(self.alloc, spec.params.len);
         var param_names = try std.ArrayList([]const u8).initCapacity(self.alloc, spec.params.len);
+
         for (spec.params) |p| {
             try param_names.append(self.alloc, p[0]);
             try param_types.append(self.alloc, type_parser.parseTypeString(self, p[1]) catch types_mod.TypeInfo{ .tag = .any });
         }
+
         const names_slice = try param_names.toOwnedSlice(self.alloc);
         const types_slice = try param_types.toOwnedSlice(self.alloc);
+
         const ret = type_parser.parseTypeString(self, spec.ret) catch types_mod.TypeInfo{ .tag = .any };
-        const sig = try self.newSig(names_slice, types_slice, ret, types_slice.len, type_params, if (spec.doc.len > 0) spec.doc else null);
+        const sig = try self.newSig(names_slice, types_slice, ret, spec.f.arity, type_params, if (spec.doc.len > 0) spec.doc else null);
+
         try self.sig_cache.put(spec, sig);
         try self.stdlib_sig_ptrs.append(self.alloc, sig);
         return sig;

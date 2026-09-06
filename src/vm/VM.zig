@@ -1325,7 +1325,8 @@ fn callNonClosureFunction(
             try self.ensureAbsoluteSlot(args_end);
             const args = fiber.registers[args_start..args_end];
 
-            if ((!f.variadic and argc != f.arity) or
+            const total = if (f.total_arity > 0) f.total_arity else f.arity;
+            if ((!f.variadic and (argc < f.arity or argc > total)) or
                 (f.variadic and argc < f.arity))
             {
                 var params = try std.ArrayList(u8).initCapacity(
@@ -1347,20 +1348,33 @@ fn callNonClosureFunction(
                     self.runtime.alloc,
                 );
                 defer self.runtime.alloc.free(params_str);
-                try self.setRuntimeMessageFmt(
-                    "fn `{s}` wants {d} args({s}), got {d}",
-                    .{
-                        func.name(),
-                        f.arity,
-                        params_str,
-                        argc,
-                    },
-                );
+                if (f.arity == total) {
+                    try self.setRuntimeMessageFmt(
+                        "`{s}` wants {d} args({s}), got {d}",
+                        .{
+                            func.name(),
+                            f.arity,
+                            params_str,
+                            argc,
+                        },
+                    );
+                } else {
+                    try self.setRuntimeMessageFmt(
+                        "`{s}` wants between {d} and {d} args({s}), got {d}",
+                        .{
+                            func.name(),
+                            f.arity,
+                            total,
+                            params_str,
+                            argc,
+                        },
+                    );
+                }
                 return error.WrongArity;
             }
 
             for (f.param_types, 0..) |spec, i| {
-                if (!spec.matches(args[i])) {
+                if (i < argc and !spec.matches(args[i])) {
                     try self.setRuntimeMessageFmt(
                         "arg #{d}: want {s}, got {s}",
                         .{
