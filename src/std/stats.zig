@@ -89,7 +89,7 @@ pub const Impl = struct {
         var mode_so_far: Data = undefined;
         var mode_so_far_count: usize = 0;
         var this_count: usize = 0;
-        
+
         var hash_it = frequencies_table.hash.orderedIterator();
         while (hash_it.next()) |entry| {
             this_count = @as(usize, @intFromFloat(entry.val.asNum().?));
@@ -111,7 +111,6 @@ pub const impls: []const api.Impl = root.impls(Impl).val;
 // .{ .name = "median_low", .f = root.define(&.{ .table }, median_low) },
 // .{ .name = "median_high", .f = root.define(&.{ .table }, median_high) },
 // .{ .name = "median_grouped", .f = root.define(&.{.table}, median_grouped) },
-// .{ .name = "mode", .f = root.define(&.{.table}, mode) },
 // .{ .name = "multimode", .f = root.define(&.{ .table }, multimode) },
 // .{ .name = "quantiles", .f = root.define(&.{.table}, quantiles) },
 // .{ .name = "stdev", .f = root.define(&.{ .table }, stdev) },
