@@ -55,17 +55,7 @@ pub const Impl = struct {
 
     pub fn remove(vm: *VM, self: Ts.table, key: Ts.any) !HostResult {
         const table = vm.tables.get(@intFromEnum(self)) catch return .errType(0, "table", typeof(Data.new.table(@intFromEnum(self)), vm));
-        const err: HostResult = res: {
-            const pos_num = Data.new.num(0); // placeholder for type check
-            _ = pos_num;
-            if (Data.new.num(0).asNum()) |n| {
-                _ = n;
-                break :res .errType(1, "num", typeof(key, vm));
-            }
-            break :res .errType(1, "num", typeof(key, vm));
-        };
-        _ = err;
-        const removed = table.hash.removeAndReturn(key, vm) orelse return .other("not found");
+        const removed = table.removeAndReturn(key, vm) orelse return .other("not found");
         return .data(removed);
     }
 
@@ -333,6 +323,7 @@ test "table methods" {
     try testing.topNumber("{1, 2}:add({3, 4}):len()", 4);
     try testing.topNumber("{1, 2}:repeat(3):len()", 6);
     try testing.topNumber("{1, 2}:repeat(0):len()", 0);
+    try testing.topTrue("let a = {1, 2, 3}; a:remove(1); a == {1, 3}");
 }
 
 test "contains? and index_of compare string content, not ids" {
