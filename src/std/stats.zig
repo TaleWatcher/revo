@@ -80,26 +80,44 @@ pub const Impl = struct {
     // stats:mode() -> num
     // Most frequent occuring value of input data.
     pub fn mode(vm: *VM, table_id: Ts.table) !HostResult {
-        const frequencies_table_id = switch (try frequencies(vm, table_id)) {
-            .ok => |v| v.asTable().?,
-            .err => |e| return .{ .err = e },
-        };
-        const frequencies_table = try vm.tables.get(frequencies_table_id);
+        const table = try vm.tables.get(@intFromEnum(table_id));
+        const data = table.array.items;
 
-        var mode_so_far: Data = undefined;
-        var mode_so_far_count: usize = 0;
-        var this_count: usize = 0;
+        if (data.len == 0) {
+            return .errType(
+                0,
+                "table with at least 1 element",
+                "no mode for empty table",
+            );
+        }
 
-        var hash_it = frequencies_table.hash.orderedIterator();
-        while (hash_it.next()) |entry| {
-            this_count = @as(usize, @intFromFloat(entry.val.asNum().?));
-            if (this_count > mode_so_far_count) {
-                mode_so_far = entry.key;
-                mode_so_far_count = this_count;
+        var freq = std.AutoHashMap(Data, usize).init(vm.runtime.alloc);
+        defer freq.deinit();
+
+        var mode_val: Data = data[0];
+        var max_freq: usize = 0;
+
+        for (data) |value| {
+            const entry = try freq.getOrPut(value);
+
+            if (!entry.found_existing) {
+                entry.value_ptr.* = 1;
+            } else {
+                entry.value_ptr.* += 1;
+            }
+
+            const count = entry.value_ptr.*;
+
+            // match numpy behaviour, on ties it'll choose the smaller value
+            if (count > max_freq or
+                (count == max_freq and vm.compare(value, mode_val) == .lt))
+            {
+                max_freq = count;
+                mode_val = value;
             }
         }
 
-        return .data(Data.new.num(mode_so_far.asNum().?));
+        return .data(mode_val);
     }
 };
 
@@ -126,6 +144,7 @@ test "stats methods" {
     try testing.topTrue("{3, 1, 2, 1, 1} |> stats.median() == 1");
     try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.median() == 1.5");
     try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.mode() == 1");
+    try testing.topTrue("{1, 1, 2, 2} |> stats.mode() == 1");
 }
 
 // fmean(data, weights=None)
