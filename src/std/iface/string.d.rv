@@ -35,6 +35,12 @@ pub declare string.starts_with? = fn(self: string, prefix: string) -> bool
 #* checks if string ends with suffix *#
 pub declare string.ends_with? = fn(self: string, suffix: string) -> bool
 
+#* checks if all characters in the string are upper case *#
+pub declare string.is_upper? = fn(self: string) -> bool
+
+#* checks if all characters in the string are lower case *#
+pub declare string.is_lower? = fn(self: string) -> bool
+
 #* reverses the string *#
 pub declare string.reverse = fn(self: string) -> string
 
