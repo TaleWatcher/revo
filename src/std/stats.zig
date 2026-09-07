@@ -76,6 +76,31 @@ pub const Impl = struct {
             return .data(Data.new.num((sorted_table.array.items[i - 1].asNum().? + sorted_table.array.items[i].asNum().?) / 2));
         }
     }
+
+    // stats:mode() -> num
+    // Most frequent occuring value of input data.
+    pub fn mode(vm: *VM, table_id: Ts.table) !HostResult {
+        const frequencies_table_id = switch (try frequencies(vm, table_id)) {
+            .ok => |v| v.asTable().?,
+            .err => |e| return .{ .err = e },
+        };
+        const frequencies_table = try vm.tables.get(frequencies_table_id);
+
+        var mode_so_far: Data = undefined;
+        var mode_so_far_count: usize = 0;
+        var this_count: usize = 0;
+        
+        var hash_it = frequencies_table.hash.orderedIterator();
+        while (hash_it.next()) |entry| {
+            this_count = @as(usize, @intFromFloat(entry.val.asNum().?));
+            if (this_count > mode_so_far_count) {
+                mode_so_far = entry.key;
+                mode_so_far_count = this_count;
+            }
+        }
+
+        return .data(Data.new.num(mode_so_far.asNum().?));
+    }
 };
 
 pub const impls: []const api.Impl = root.impls(Impl).val;
@@ -83,7 +108,6 @@ pub const impls: []const api.Impl = root.impls(Impl).val;
 // .{ .name = "fmean", .f = root.define(&.{ .table }, fmean) },
 // .{ .name = "geometric_mean", .f = root.define(&.{ .table }, geometric_mean) },
 // .{ .name = "harmonic_mean", .f = root.defineVariadic(&.{.table}, harmonic_mean) },
-// .{ .name = "median", .f = root.define(&.{.table}, median) },
 // .{ .name = "median_low", .f = root.define(&.{ .table }, median_low) },
 // .{ .name = "median_high", .f = root.define(&.{ .table }, median_high) },
 // .{ .name = "median_grouped", .f = root.define(&.{.table}, median_grouped) },
@@ -102,6 +126,7 @@ test "stats methods" {
     try testing.topTrue("{1, 1, 1, 2, 3} |> stats.mean() == 1.6");
     try testing.topTrue("{3, 1, 2, 1, 1} |> stats.median() == 1");
     try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.median() == 1.5");
+    try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.mode() == 1");
 }
 
 // fmean(data, weights=None)
