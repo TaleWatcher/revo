@@ -53,9 +53,17 @@ pub const Impl = struct {
     // stats:median() -> num
     // Middle value of input data.
     pub fn median(vm: *VM, table_id: Ts.table) !HostResult {
-        const sorted_table_id = try table_methods.copy(vm, table_id);
-        const sorted_table = (try vm.tables.get(@intFromEnum(sorted_table_id))).*;
-        try table_methods.sort(vm, sorted_table_id);
+        // copy instead of doing it ourselves
+        const copied_table_id = switch (try table_methods.copy(vm, table_id)) {
+            .ok => |v| v.asTable().?,
+            .err => |e| return .{ .err = e },
+        };
+
+        // can safely unwrap because sort() does not return an error
+        const res = (try table_methods.sort(vm, @enumFromInt(copied_table_id))).ok.asTable().?;
+
+        // good hygiene to drill the latest id you have
+        const sorted_table = try vm.tables.get(res);
         const n: usize = sorted_table.array.items.len;
 
         if (n == 0) {
@@ -95,7 +103,6 @@ test "stats methods" {
     try testing.topTrue("{3, 1, 2, 1, 1} |> stats.median() == 1");
     try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.median() == 1.5");
 }
-
 
 // fmean(data, weights=None)
 // Fast, floating-point arithmetic mean, with optional weighting.

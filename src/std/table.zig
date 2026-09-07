@@ -119,8 +119,10 @@ pub const Impl = struct {
         const table = try vm.tables.get(@intFromEnum(self));
         const new_table = try vm.tables.create();
         const new_t = try vm.tables.get(new_table);
+
         try new_t.array.appendSlice(vm.runtime.alloc, table.array.items);
         var hash_it = table.hash.orderedIterator();
+
         while (hash_it.next()) |entry| {
             try new_t.putRaw(entry.key, entry.val, vm);
         }
