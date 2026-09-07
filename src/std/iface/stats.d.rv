@@ -15,4 +15,4 @@ pub declare stats.mean = fn(self: table<num>) -> num
 #*
 middle value of input data
 *#
-pub declare stats.mean = fn(self: table<num>) -> num
+pub declare stats.median = fn(self: table<num>) -> num

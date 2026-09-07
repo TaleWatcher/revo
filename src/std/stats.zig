@@ -53,10 +53,11 @@ pub const Impl = struct {
     // stats:median() -> num
     // Middle value of input data.
     pub fn median(vm: *VM, table_id: Ts.table) !HostResult {
-        const sorted_table_id = try table_methods.sort(vm, table_id);
-        const sorted_table = try vm.tables.get(@intFromEnum(sorted_table_id));
-
+        const sorted_table_id = try table_methods.copy(vm, table_id);
+        const sorted_table = (try vm.tables.get(@intFromEnum(sorted_table_id))).*;
+        try table_methods.sort(vm, sorted_table_id);
         const n: usize = sorted_table.array.items.len;
+
         if (n == 0) {
             return .errType(0, "table with at least 1 element", "no median for empty data");
         } else if (n % 2 == 1) {
@@ -91,8 +92,8 @@ pub const impls: []const api.Impl = root.impls(Impl).val;
 test "stats methods" {
     try testing.topTrue("{1, 1, 1, 2, 3, 3} |> stats.frequencies() == {1=3, 2=1, 3=2}");
     try testing.topTrue("{1, 1, 1, 2, 3} |> stats.mean() == 1.6");
-    try testing.topTrue("{1, 1, 1, 2, 3} |> stats.median() == 1");
-    try testing.topTrue("{1, 1, 1, 2, 3, 3} |> stats.median() == 1.5");
+    try testing.topTrue("{3, 1, 2, 1, 1} |> stats.median() == 1");
+    try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.median() == 1.5");
 }
 
 
