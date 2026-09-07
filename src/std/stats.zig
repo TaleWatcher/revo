@@ -2,6 +2,7 @@ const std = @import("std");
 const revo = @import("revo");
 const api = @import("api.zig");
 const root = @import("root.zig");
+const table_std = @import("table.zig");
 // const pool = @import("pool.zig");
 const Ts = root.T;
 
@@ -14,6 +15,7 @@ const Uri = std.Uri;
 const Component = std.Uri.Component;
 const Table = revo.table.Table;
 const testing = revo.lang.testing;
+const table_methods = table_std.Impl;
 
 pub const Impl = struct {
     /// > stats:frequencies() -> table<any>
@@ -24,11 +26,9 @@ pub const Impl = struct {
         const result_table_id = try vm.tables.create();
         const result = try vm.tables.get(result_table_id);
 
-        var this_count: f64 = undefined;
         for (table.array.items) |ele| {
             if (try result.get(ele, vm)) |this_count_data| {
-                this_count = this_count_data.asNum().?;
-                try result.put(result_table_id, vm, ele, Data.new.num(this_count + 1));
+                try result.put(result_table_id, vm, ele, Data.new.num(this_count_data.asNum().? + 1));
             } else {
                 try result.put(result_table_id, vm, ele, Data.new.num(1));
             }
@@ -36,11 +36,40 @@ pub const Impl = struct {
 
         return .data(Data.new.table(result_table_id));
     }
+
+    // stats:mean() -> num
+    // Arithmetic mean (“average”) of data.
+    pub fn mean(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+
+        var sum: f64 = 0.0;
+        for (table.array.items) |ele| {
+            sum += ele.asNum().?;
+        }
+
+        return .data(Data.new.num(sum / @as(f64, @floatFromInt(table.array.items.len))));
+    }
+
+    // stats:median() -> num
+    // Middle value of input data.
+    pub fn median(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+        const sorted_table = Data.new.table(table_methods.sort(vm, table_id));
+
+        const n: usize = sorted_table.array.items.len;
+        if (n == 0) {
+            return .errType(0, "table with at least 1 element", "no median for empty data");
+        } else if (n % 2 == 1) {
+            .data(Data.new.num(sorted_table.array.items[n / 2].asNum().?));
+        } else {
+            const i: usize = n / 2;
+            return .data(Data.new.num(sorted_table.array.items[i - 1].asNum().? + sorted_table.array.items[i].asNum().?) / 2);
+        }
+    }
 };
 
 pub const impls: []const api.Impl = root.impls(Impl).val;
 // ++ &.{
-// .{ .name = "mean", .f = root.define(&.{.table}, mean) },
 // .{ .name = "fmean", .f = root.define(&.{ .table }, fmean) },
 // .{ .name = "geometric_mean", .f = root.define(&.{ .table }, geometric_mean) },
 // .{ .name = "harmonic_mean", .f = root.defineVariadic(&.{.table}, harmonic_mean) },
@@ -60,10 +89,11 @@ pub const impls: []const api.Impl = root.impls(Impl).val;
 
 test "stats methods" {
     try testing.topTrue("{1, 1, 1, 2, 3, 3} |> stats.frequencies() == {1=3, 2=1, 3=2}");
+    try testing.topTrue("{1, 1, 1, 2, 3} |> stats.mean() == 1.6");
+    try testing.topTrue("{1, 1, 1, 2, 3} |> stats.median() == 1");
+    try testing.topTrue("{1, 1, 1, 2, 3, 3} |> stats.median() == 1.5");
 }
 
-// mean(data)
-// Arithmetic mean (“average”) of data.
 
 // fmean(data, weights=None)
 // Fast, floating-point arithmetic mean, with optional weighting.
