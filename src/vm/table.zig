@@ -519,10 +519,19 @@ pub const Table = struct {
         self.ic_version +%= 1;
         if (integerArrayIndex(key)) |idx| {
             if (idx >= self.array.items.len) return false;
-            self.array.items[idx] = Data.new.nil();
+            _ = self.array.orderedRemove(idx);
             return true;
         }
         return self.hash.remove(key, vm) != null;
+    }
+
+    pub fn removeAndReturn(self: *Table, key: Data, vm: *revo.VM) ?Data {
+        self.ic_version +%= 1;
+        if (integerArrayIndex(key)) |idx| {
+            if (idx >= self.array.items.len) return null;
+            return self.array.orderedRemove(idx);
+        }
+        return self.hash.removeAndReturn(key, vm);
     }
 
     const MAX_TAG_LOOP = 200;
