@@ -53,17 +53,18 @@ pub const Impl = struct {
     // stats:median() -> num
     // Middle value of input data.
     pub fn median(vm: *VM, table_id: Ts.table) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(table_id));
-        const sorted_table = Data.new.table(table_methods.sort(vm, table_id));
+        const sorted_table_id = try table_methods.sort(vm, table_id);
+        const sorted_table = try vm.tables.get(@intFromEnum(sorted_table_id));
 
         const n: usize = sorted_table.array.items.len;
         if (n == 0) {
             return .errType(0, "table with at least 1 element", "no median for empty data");
         } else if (n % 2 == 1) {
-            .data(Data.new.num(sorted_table.array.items[n / 2].asNum().?));
+            const middle_ele = sorted_table.array.items[n / 2];
+            return .data(Data.new.num(middle_ele.asNum().?));
         } else {
             const i: usize = n / 2;
-            return .data(Data.new.num(sorted_table.array.items[i - 1].asNum().? + sorted_table.array.items[i].asNum().?) / 2);
+            return .data(Data.new.num((sorted_table.array.items[i - 1].asNum().? + sorted_table.array.items[i].asNum().?) / 2));
         }
     }
 };

@@ -11,3 +11,8 @@ pub declare stats.frequencies = fn(self: table<any>) -> table<any, int>
 calculates the arithmetic mean of an array of numbers
 *#
 pub declare stats.mean = fn(self: table<num>) -> num
+
+#*
+middle value of input data
+*#
+pub declare stats.mean = fn(self: table<num>) -> num
