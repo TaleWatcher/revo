@@ -61,3 +61,9 @@ pub declare stats.kurtosis = fn(self: table<num>) -> num
 sample kurtosis of the input data
 *#
 pub declare stats.sample_kurtosis = fn(self: table<num>) -> num
+
+
+#*
+table of all statistics of the input data
+*#
+pub declare stats.statistics = fn(self: table<num>) -> table
