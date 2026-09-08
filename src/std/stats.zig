@@ -31,6 +31,7 @@ const RunningStats = struct {
     prd: f64 = 0.0,
     // statistical moments, mom1 is mean
     mom1: f64 = 0.0,
+    mom1_comp: f64 = 0.0,
     mom2: f64 = 0.0,
     mom3: f64 = 0.0,
     mom4: f64 = 0.0,
@@ -87,13 +88,15 @@ const RunningStats = struct {
         const n_float = @as(f64, @floatFromInt(self.n));
         const nm1_float = @as(f64, @floatFromInt(self.n - 1));
         const delta = x - self.mom1;
-        const delta_n = delta / n_float;
+        const delta_n = (delta / n_float) - self.mom1_comp;
         const delta_n2 = delta_n * delta_n;
         const term1 = delta * delta_n * nm1_float;
         self.mom4 += term1 * delta_n2 * (n_float*n_float - 3*n_float + 3) + 6*delta_n2*self.mom2 - 4*delta_n*self.mom3;
         self.mom3 += term1 * delta_n * (n_float - 2) - 3*delta_n*self.mom2;
         self.mom2 += term1;
-        self.mom1 += delta_n;
+        const next_mean = self.mom1 + delta_n;
+        self.mom1_comp = (next_mean - self.mom1) - delta_n;
+        self.mom1 = next_mean;
     }
 
     fn pushData(self: *RunningStats, data: *std.ArrayList(f64)) !void {
@@ -228,12 +231,11 @@ pub const Impl = struct {
     pub fn mean(vm: *VM, table_id: Ts.table) !HostResult {
         const table = try vm.tables.get(@intFromEnum(table_id));
 
-        var sum: f64 = 0.0;
-        for (table.array.items) |ele| {
-            sum += ele.asNum().?;
-        }
+        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
+        defer runningStats.deinit();
+        try runningStats.pushTableData(&table.array);
 
-        return .data(Data.new.num(sum / @as(f64, @floatFromInt(table.array.items.len))));
+        return .data(Data.new.num(runningStats.mean()));
     }
 
     // stats:median() -> num
