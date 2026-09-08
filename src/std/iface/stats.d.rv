@@ -26,3 +26,28 @@ pub declare stats.mode = fn(self: table<num>) -> num
 population variance of the input data
 *#
 pub declare stats.variance = fn(self: table<num>) -> num
+
+#*
+sample variance of the input data
+*#
+pub declare stats.sample_variance = fn(self: table<num>) -> num
+
+#*
+population skewness of the input data
+*#
+pub declare stats.skewness = fn(self: table<num>) -> num
+
+#*
+sample skewness of the input data
+*#
+pub declare stats.sample_skewness = fn(self: table<num>) -> num
+
+#*
+population kurtosis of the input data
+*#
+pub declare stats.kurtosis = fn(self: table<num>) -> num
+
+#*
+sample kurtosis of the input data
+*#
+pub declare stats.sample_kurtosis = fn(self: table<num>) -> num
