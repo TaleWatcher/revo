@@ -27,6 +27,8 @@ const RunningStats = struct {
     min: f64 = 0.0,
     max: f64 = 0.0,
     sum: f64 = 0.0,
+    ssq: f64 = 0.0,
+    prd: f64 = 0.0,
     // statistical moments, mom1 is mean
     mom1: f64 = 0.0,
     mom2: f64 = 0.0,
@@ -47,6 +49,12 @@ const RunningStats = struct {
         self.n += 1;
         // See Knuth TAOCP vol 2, 3rd edition, page 232
         self.sum += x;
+        self.ssq += x * x
+        if (self.n == 1) {
+            self.prd = x;
+        } else {
+            self.prd *= x;
+        }
         const n_float = @as(f64, @floatFromInt(self.n));
         const delta = x - self.mom1;
         const delta_n = delta / n_float;
@@ -132,14 +140,7 @@ test "RunningStats struct and methods" {
 
     var list: std.ArrayList(f64) = .empty;
     defer list.deinit(a);
-    try list.append(a, 1.0);
-    try list.append(a, 2.0);
-    try list.append(a, 1.0);
-    try list.append(a, 4.0);
-    try list.append(a, 1.0);
-    try list.append(a, 4.0);
-    try list.append(a, 1.0);
-    try list.append(a, 2.0);
+    try list.appendSlice(a, &.{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0});
 
     var runningStats: RunningStats = .{};
     runningStats.pushData(&list);
