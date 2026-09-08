@@ -215,12 +215,17 @@ pub const Impl = struct {
         const result_table_id = try vm.tables.create();
         const result = try vm.tables.get(result_table_id);
 
-        for (table.array.items) |ele| {
-            if (try result.get(ele, vm)) |this_count_data| {
-                try result.put(result_table_id, vm, ele, Data.new.num(this_count_data.asNum().? + 1));
-            } else {
-                try result.put(result_table_id, vm, ele, Data.new.num(1));
-            }
+        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
+        defer runningStats.deinit();
+        try runningStats.pushTableData(&table.array);
+
+        var freq_it = runningStats.freq.iterator();
+        while(freq_it.next()) |entry| {
+            try result.put(
+                result_table_id, vm,
+                Data.new.num(@as(f64, @bitCast(entry.key_ptr.*))),
+                Data.new.num(entry.value_ptr.*)
+            );
         }
 
         return .data(Data.new.table(result_table_id));
