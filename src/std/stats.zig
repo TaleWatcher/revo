@@ -34,8 +34,21 @@ const RunningStats = struct {
     mom2: f64 = 0.0,
     mom3: f64 = 0.0,
     mom4: f64 = 0.0,
+    // hashmap for tracking frequencies
+    freq: std.AutoHashMap(u64, usize),
+    imode: f64 = undefined,
+    imode_count: usize = 0,
 
-    fn pushEle(self: *RunningStats, x: f64) void {
+    pub fn init(allocator: std.mem.Allocator) RunningStats {
+        return .{
+            .freq = std.AutoHashMap(u64, usize).init(allocator),
+        };
+    }
+    pub fn deinit(self: *RunningStats) void {
+        self.freq.deinit();
+    }
+
+    fn pushEle(self: *RunningStats, x: f64) !void {
         // Pushes a value `x` for processing.
         if (self.n == 0) {
             self.min = x;
@@ -55,6 +68,22 @@ const RunningStats = struct {
         } else {
             self.prd *= x;
         }
+
+        const entry = try self.freq.getOrPut(@bitCast(x));
+        if (!entry.found_existing) {
+            entry.value_ptr.* = 1;
+        } else {
+            entry.value_ptr.* += 1;
+        }
+        const this_count = entry.value_ptr.*;
+        // match numpy behaviour, on ties it'll choose the smaller value
+        if (this_count > self.imode_count or
+            (this_count == self.imode_count and x < self.imode))
+        {
+            self.imode_count = this_count;
+            self.imode = x;
+        }
+
         const n_float = @as(f64, @floatFromInt(self.n));
         const delta = x - self.mom1;
         const delta_n = delta / n_float;
@@ -66,21 +95,26 @@ const RunningStats = struct {
         self.mom1 += delta_n;
     }
 
-    fn pushData(self: *RunningStats, data: *std.ArrayList(f64)) void {
+    fn pushData(self: *RunningStats, data: *std.ArrayList(f64)) !void {
         for (data.items) |value| {
-            self.pushEle(value);
+            try self.pushEle(value);
         }
     }
 
-    fn pushTableData(self: *RunningStats, data: *std.ArrayList(Data)) void {
+    fn pushTableData(self: *RunningStats, data: *std.ArrayList(Data)) !void {
         for (data.items) |value| {
-            self.pushEle(value.asNum().?);
+            try self.pushEle(value.asNum().?);
         }
     }
 
     fn mean(self: *RunningStats) f64 {
         // Computes the current mean of `self`.
         return self.mom1;
+    }
+
+    fn mode(self: *RunningStats) f64 {
+        // Computes the current mode of `self`.
+        return self.imode;
     }
 
     fn variance(self: *RunningStats) f64 {
@@ -142,8 +176,9 @@ test "RunningStats struct and methods" {
     defer list.deinit(a);
     try list.appendSlice(a, &.{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0});
 
-    var runningStats: RunningStats = .{};
-    runningStats.pushData(&list);
+    var runningStats: RunningStats = RunningStats.init(a);
+    defer runningStats.deinit();
+    try runningStats.pushData(&list);
     const tolerance = 0.00001;
 
     try expect(runningStats.n == 8);
@@ -155,16 +190,6 @@ test "RunningStats struct and methods" {
     try std.testing.expectApproxEqAbs(runningStats.kurtosis(), -1.0, tolerance);
     try std.testing.expectApproxEqAbs(runningStats.kurtosisS(), -0.7000000000000008, tolerance);
 }
-
-const Statistics = struct {
-    running: RunningStats,
-    variance: f64,
-    varianceS: f64,
-    skewness: f64,
-    skewnessS: f64,
-    kurtosis: f64,
-    kurtosisS: f64,
-};
 
 // const RunningRegress = struct { // An accumulator for regression calculations.
 //     n: usize,                   // amount of pushed data
@@ -237,43 +262,12 @@ pub const Impl = struct {
     // Most frequent occuring value of input data.
     pub fn mode(vm: *VM, table_id: Ts.table) !HostResult {
         const table = try vm.tables.get(@intFromEnum(table_id));
-        const data = table.array.items;
 
-        if (data.len == 0) {
-            return .errType(
-                0,
-                "table with at least 1 element",
-                "no mode for empty table",
-            );
-        }
+        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
+        defer runningStats.deinit();
+        try runningStats.pushTableData(&table.array);
 
-        var freq = std.AutoHashMap(Data, usize).init(vm.runtime.alloc);
-        defer freq.deinit();
-
-        var mode_val: Data = data[0];
-        var max_freq: usize = 0;
-
-        for (data) |value| {
-            const entry = try freq.getOrPut(value);
-
-            if (!entry.found_existing) {
-                entry.value_ptr.* = 1;
-            } else {
-                entry.value_ptr.* += 1;
-            }
-
-            const count = entry.value_ptr.*;
-
-            // match numpy behaviour, on ties it'll choose the smaller value
-            if (count > max_freq or
-                (count == max_freq and vm.compare(value, mode_val) == .lt))
-            {
-                max_freq = count;
-                mode_val = value;
-            }
-        }
-
-        return .data(mode_val);
+        return .data(Data.new.num(runningStats.mode()));
     }
 
     // stats:variance() -> num
@@ -281,8 +275,9 @@ pub const Impl = struct {
     pub fn variance(vm: *VM, table_id: Ts.table) !HostResult {
         const table = try vm.tables.get(@intFromEnum(table_id));
 
-        var runningStats: RunningStats = .{};
-        runningStats.pushTableData(&table.array);
+        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
+        defer runningStats.deinit();
+        try runningStats.pushTableData(&table.array);
 
         return .data(Data.new.num(runningStats.variance()));
     }
@@ -292,8 +287,9 @@ pub const Impl = struct {
     pub fn sample_variance(vm: *VM, table_id: Ts.table) !HostResult {
         const table = try vm.tables.get(@intFromEnum(table_id));
 
-        var runningStats: RunningStats = .{};
-        runningStats.pushTableData(&table.array);
+        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
+        defer runningStats.deinit();
+        try runningStats.pushTableData(&table.array);
 
         return .data(Data.new.num(runningStats.varianceS()));
     }
@@ -303,8 +299,9 @@ pub const Impl = struct {
     pub fn skewness(vm: *VM, table_id: Ts.table) !HostResult {
         const table = try vm.tables.get(@intFromEnum(table_id));
 
-        var runningStats: RunningStats = .{};
-        runningStats.pushTableData(&table.array);
+        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
+        defer runningStats.deinit();
+        try runningStats.pushTableData(&table.array);
 
         return .data(Data.new.num(runningStats.skewness()));
     }
@@ -314,8 +311,9 @@ pub const Impl = struct {
     pub fn sample_skewness(vm: *VM, table_id: Ts.table) !HostResult {
         const table = try vm.tables.get(@intFromEnum(table_id));
 
-        var runningStats: RunningStats = .{};
-        runningStats.pushTableData(&table.array);
+        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
+        defer runningStats.deinit();
+        try runningStats.pushTableData(&table.array);
 
         return .data(Data.new.num(runningStats.skewnessS()));
     }
@@ -325,8 +323,9 @@ pub const Impl = struct {
     pub fn kurtosis(vm: *VM, table_id: Ts.table) !HostResult {
         const table = try vm.tables.get(@intFromEnum(table_id));
 
-        var runningStats: RunningStats = .{};
-        runningStats.pushTableData(&table.array);
+        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
+        defer runningStats.deinit();
+        try runningStats.pushTableData(&table.array);
 
         return .data(Data.new.num(runningStats.kurtosis()));
     }
@@ -336,8 +335,9 @@ pub const Impl = struct {
     pub fn sample_kurtosis(vm: *VM, table_id: Ts.table) !HostResult {
         const table = try vm.tables.get(@intFromEnum(table_id));
 
-        var runningStats: RunningStats = .{};
-        runningStats.pushTableData(&table.array);
+        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
+        defer runningStats.deinit();
+        try runningStats.pushTableData(&table.array);
 
         return .data(Data.new.num(runningStats.kurtosisS()));
     }
