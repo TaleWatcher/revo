@@ -12,8 +12,6 @@ const memory = revo.memory;
 const Data = memory.Data;
 const VM = revo.VM;
 const HostResult = root.HostResult;
-const Uri = std.Uri;
-const Component = std.Uri.Component;
 const Table = revo.table.Table;
 const testing = revo.lang.testing;
 const table_methods = table_std.Impl;
@@ -105,9 +103,12 @@ const RunningStats = struct {
         }
     }
 
+    // callers to surface a proper HostResult error instead of panicking
+    // when the table contains a non-numeric element
     fn pushTableData(self: *RunningStats, data: *std.ArrayList(Data)) !void {
         for (data.items) |value| {
-            try self.pushEle(value.asNum().?);
+            const num = value.asNum() orelse return error.NonNumericValue;
+            try self.pushEle(num);
         }
     }
 
@@ -129,12 +130,11 @@ const RunningStats = struct {
 
     fn varianceS(self: *RunningStats) f64 {
         // Computes the current sample variance of `self`.
-        const nm1_float = @as(f64, @floatFromInt(self.n - 1));
-        if (self.n > 1) {
-            return self.mom2 / nm1_float;
-        } else {
-            return 0.0;
-        }
+        if (self.n <= 1) return 0.0;
+
+        const n_float = @as(f64, @floatFromInt(self.n));
+        const nm1_float = n_float - 1.0;
+        return self.mom2 / nm1_float;
     }
 
     fn standardDeviation(self: *RunningStats) f64 {
@@ -155,8 +155,10 @@ const RunningStats = struct {
 
     fn skewnessS(self: *RunningStats) f64 {
         // Computes the current sample skewness of `self`.
+        if (self.n <= 2) return 0.0;
+
         const n_float = @as(f64, @floatFromInt(self.n));
-        const nm2_float = @as(f64, @floatFromInt(self.n - 2));
+        const nm2_float = n_float - 2.0;
         const s2 = self.skewness();
         return math.sqrt(n_float * (n_float - 1)) * s2 / nm2_float;
     }
@@ -169,9 +171,12 @@ const RunningStats = struct {
 
     fn kurtosisS(self: *RunningStats) f64 {
         // Computes the current sample kurtosis of `self`.
-        const nm1_float = @as(f64, @floatFromInt(self.n - 1));
-        const np1_float = @as(f64, @floatFromInt(self.n + 1));
-        const nm2_x_nm3_float = @as(f64, @floatFromInt((self.n - 2) * (self.n - 3)));
+        if (self.n <= 3) return 0.0;
+
+        const n_float = @as(f64, @floatFromInt(self.n));
+        const nm1_float = n_float - 1.0;
+        const np1_float = n_float + 1.0;
+        const nm2_x_nm3_float = (n_float - 2.0) * (n_float - 3.0);
         return nm1_float / nm2_x_nm3_float * (np1_float * self.kurtosis() + 6);
     }
 };
@@ -207,17 +212,43 @@ test "RunningStats struct and methods" {
 // };
 
 pub const Impl = struct {
-    /// > stats:frequencies() -> table<any>
+    fn buildStats(vm: *VM, table_id: Ts.table) !RunningStats {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+
+        if (table.array.items.len == 0) {
+            return error.EmptyTable;
+        }
+
+        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
+        errdefer runningStats.deinit();
+        try runningStats.pushTableData(&table.array);
+        return runningStats;
+    }
+
+    /// convert a zig error into a HostResult.err for correctness
+    /// malformed input has to return a .err error instead of throwing a zig error
+    fn statsErrResult(e: anyerror) !HostResult {
+        switch (e) {
+            error.EmptyTable => return .errType(0, "table with at least 1 element", "no statistics for empty data"),
+            error.NonNumericValue => return .errType(0, "table of numbers", "table contains a non-numeric value"),
+            else => return e,
+        }
+    }
+
+    fn numStat(vm: *VM, table_id: Ts.table, comptime compute: fn (*RunningStats) f64) !HostResult {
+        var runningStats = buildStats(vm, table_id) catch |e| return statsErrResult(e);
+        defer runningStats.deinit();
+        return .data(Data.new.num(compute(&runningStats)));
+    }
+
+    /// > stats.frequencies(table) -> table<any>
     /// returns a histogram of element frequencies as table (ele: freq)
     pub fn frequencies(vm: *VM, table_id: Ts.table) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(table_id));
+        var runningStats = buildStats(vm, table_id) catch |e| return statsErrResult(e);
+        defer runningStats.deinit();
 
         const result_table_id = try vm.tables.create();
         const result_table = try vm.tables.get(result_table_id);
-
-        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
-        defer runningStats.deinit();
-        try runningStats.pushTableData(&table.array);
 
         var freq_it = runningStats.freq.iterator();
         while (freq_it.next()) |entry| {
@@ -227,19 +258,13 @@ pub const Impl = struct {
         return .data(Data.new.table(result_table_id));
     }
 
-    // stats:mean() -> num
+    // stats.mean(table) -> num
     // Arithmetic mean (“average”) of data.
     pub fn mean(vm: *VM, table_id: Ts.table) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(table_id));
-
-        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
-        defer runningStats.deinit();
-        try runningStats.pushTableData(&table.array);
-
-        return .data(Data.new.num(runningStats.mean()));
+        return numStat(vm, table_id, RunningStats.mean);
     }
 
-    // stats:median() -> num
+    // stats.median(table) -> num
     // Middle value of input data.
     pub fn median(vm: *VM, table_id: Ts.table) !HostResult {
         // copy instead of doing it ourselves
@@ -266,126 +291,74 @@ pub const Impl = struct {
         }
     }
 
-    // stats:mode() -> num
+    // -- [wrappers] ----------------------------------------------------------
+    // do not comptime inline-for this in impls
+    //
+
+    // stats.mode(table) -> num
     // Most frequent occuring value of input data.
     pub fn mode(vm: *VM, table_id: Ts.table) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(table_id));
-
-        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
-        defer runningStats.deinit();
-        try runningStats.pushTableData(&table.array);
-
-        return .data(Data.new.num(runningStats.mode()));
+        return numStat(vm, table_id, RunningStats.mode);
     }
 
-    // stats:variance() -> num
+    // stats.variance(table) -> num
     // Population variance of the data.
     pub fn variance(vm: *VM, table_id: Ts.table) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(table_id));
-
-        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
-        defer runningStats.deinit();
-        try runningStats.pushTableData(&table.array);
-
-        return .data(Data.new.num(runningStats.variance()));
+        return numStat(vm, table_id, RunningStats.variance);
     }
 
-    // stats:sample_variance() -> num
+    // stats.sample_variance(table) -> num
     // Sample variance of the data.
     pub fn sample_variance(vm: *VM, table_id: Ts.table) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(table_id));
-
-        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
-        defer runningStats.deinit();
-        try runningStats.pushTableData(&table.array);
-
-        return .data(Data.new.num(runningStats.varianceS()));
+        return numStat(vm, table_id, RunningStats.varianceS);
     }
 
-    // stats:stdev() -> num
+    // stats.stdev(table) -> num
     // Population standard deviation of the data.
     pub fn stdev(vm: *VM, table_id: Ts.table) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(table_id));
-
-        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
-        defer runningStats.deinit();
-        try runningStats.pushTableData(&table.array);
-
-        return .data(Data.new.num(runningStats.standardDeviation()));
+        return numStat(vm, table_id, RunningStats.standardDeviation);
     }
 
-    // stats:sample_stdev() -> num
+    // stats.sample_stdev(table) -> num
     // Sample standard deviation of the data.
     pub fn sample_stdev(vm: *VM, table_id: Ts.table) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(table_id));
-
-        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
-        defer runningStats.deinit();
-        try runningStats.pushTableData(&table.array);
-
-        return .data(Data.new.num(runningStats.standardDeviationS()));
+        return numStat(vm, table_id, RunningStats.standardDeviationS);
     }
 
-    // stats:skewness() -> num
+    // stats.skewness(table) -> num
     // Population skewness of the data.
     pub fn skewness(vm: *VM, table_id: Ts.table) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(table_id));
-
-        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
-        defer runningStats.deinit();
-        try runningStats.pushTableData(&table.array);
-
-        return .data(Data.new.num(runningStats.skewness()));
+        return numStat(vm, table_id, RunningStats.skewness);
     }
 
-    // stats:sample_skewness() -> num
+    // stats.sample_skewness(table) -> num
     // Sample skewness of the data.
     pub fn sample_skewness(vm: *VM, table_id: Ts.table) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(table_id));
-
-        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
-        defer runningStats.deinit();
-        try runningStats.pushTableData(&table.array);
-
-        return .data(Data.new.num(runningStats.skewnessS()));
+        return numStat(vm, table_id, RunningStats.skewnessS);
     }
 
-    // stats:kurtosis() -> num
+    // stats.kurtosis(table) -> num
     // Population kurtosis of the data.
     pub fn kurtosis(vm: *VM, table_id: Ts.table) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(table_id));
-
-        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
-        defer runningStats.deinit();
-        try runningStats.pushTableData(&table.array);
-
-        return .data(Data.new.num(runningStats.kurtosis()));
+        return numStat(vm, table_id, RunningStats.kurtosis);
     }
 
-    // stats:sample_kurtosis() -> num
+    // stats.sample_kurtosis(table) -> num
     // Sample kurtosis of the data.
     pub fn sample_kurtosis(vm: *VM, table_id: Ts.table) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(table_id));
-
-        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
-        defer runningStats.deinit();
-        try runningStats.pushTableData(&table.array);
-
-        return .data(Data.new.num(runningStats.kurtosisS()));
+        return numStat(vm, table_id, RunningStats.kurtosisS);
     }
 
-    // stats:statistics() -> num
-    // Sample kurtosis of the data.
+    // stats.statistics(table) -> table
+    // table of all statistics of the input data
     pub fn statistics(vm: *VM, table_id: Ts.table) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(table_id));
+        var runningStats = buildStats(vm, table_id) catch |e| return statsErrResult(e);
+        defer runningStats.deinit();
+
         const result_table_id = try vm.tables.create();
         const result_table = try vm.tables.get(result_table_id);
         const freq_table_id = try vm.tables.create();
         const freq_table = try vm.tables.get(freq_table_id);
-
-        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
-        defer runningStats.deinit();
-        try runningStats.pushTableData(&table.array);
 
         var freq_it = runningStats.freq.iterator();
         while (freq_it.next()) |entry| {
