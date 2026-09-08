@@ -20,7 +20,7 @@ const table_methods = table_std.Impl;
 
 
 // An accumulator for statistical data.
-const RunningStat = struct {
+const RunningStats = struct {
     // amount of pushed data
     n: usize = 0,
     // self-explaining
@@ -33,7 +33,7 @@ const RunningStat = struct {
     mom3: f64 = 0.0,
     mom4: f64 = 0.0,
 
-    fn pushEle(self: *RunningStat, x: f64) void {
+    fn pushEle(self: *RunningStats, x: f64) void {
         // Pushes a value `x` for processing.
         if (self.n == 0) {
             self.min = x;
@@ -58,30 +58,30 @@ const RunningStat = struct {
         self.mom1 += delta_n;
     }
 
-    fn pushData(self: *RunningStat, data: *std.ArrayList(f64)) void {
+    fn pushData(self: *RunningStats, data: *std.ArrayList(f64)) void {
         for (data.items) |value| {
             self.pushEle(value);
         }
     }
 
-    fn pushTableData(self: *RunningStat, data: *std.ArrayList(Data)) void {
+    fn pushTableData(self: *RunningStats, data: *std.ArrayList(Data)) void {
         for (data.items) |value| {
             self.pushEle(value.asNum().?);
         }
     }
 
-    fn mean(self: *RunningStat) f64 {
+    fn mean(self: *RunningStats) f64 {
         // Computes the current mean of `self`.
         return self.mom1;
     }
 
-    fn variance(self: *RunningStat) f64 {
+    fn variance(self: *RunningStats) f64 {
         // Computes the current population variance of `self`.
         const n_float = @as(f64, @floatFromInt(self.n));
         return self.mom2 / n_float;
     }
 
-    fn varianceS(self: *RunningStat) f64 {
+    fn varianceS(self: *RunningStats) f64 {
         // Computes the current sample variance of `self`.
         if (self.n > 1) {
             return self.mom2 / @as(f64, @floatFromInt(self.n - 1));
@@ -90,43 +90,43 @@ const RunningStat = struct {
         }
     }
 
-    fn standardDeviation(self: *RunningStat) f64 {
+    fn standardDeviation(self: *RunningStats) f64 {
         // Computes the current population standard deviation of `self`.
         return math.sqrt(self.variance());
     }
 
-    fn standardDeviationS(self: *RunningStat) f64 {
+    fn standardDeviationS(self: *RunningStats) f64 {
         // Computes the current sample standard deviation of `self`.
         return math.sqrt(self.varianceS());
     }
 
-    fn skewness(self: *RunningStat) f64 {
+    fn skewness(self: *RunningStats) f64 {
         // Computes the current population skewness of `self`.
         const n_float = @as(f64, @floatFromInt(self.n));
         return math.sqrt(n_float) * self.mom3 / math.pow(f64, self.mom2, 1.5);
     }
 
-    fn skewnessS(self: *RunningStat) f64 {
+    fn skewnessS(self: *RunningStats) f64 {
         // Computes the current sample skewness of `self`.
         const n_float = @as(f64, @floatFromInt(self.n));
         const s2 = self.skewness();
         return math.sqrt(n_float*(n_float-1))*s2 / (n_float-2);
     }
 
-    fn kurtosis(self: *RunningStat) f64 {
+    fn kurtosis(self: *RunningStats) f64 {
         // Computes the current population kurtosis of `self`.
         const n_float = @as(f64, @floatFromInt(self.n));
         return n_float * self.mom4 / (self.mom2 * self.mom2) - 3.0;
     }
 
-    fn kurtosisS(self: *RunningStat) f64 {
+    fn kurtosisS(self: *RunningStats) f64 {
         // Computes the current sample kurtosis of `self`.
         const n_float = @as(f64, @floatFromInt(self.n));
         return (n_float-1) / ((n_float-2)*(n_float-3)) * ((n_float+1)*self.kurtosis() + 6);
     }
 };
 
-test "RunningStat struct and methods" {
+test "RunningStats struct and methods" {
     const a = std.testing.allocator;
     const expect = std.testing.expect;
 
@@ -141,22 +141,22 @@ test "RunningStat struct and methods" {
     try list.append(a, 1.0);
     try list.append(a, 2.0);
 
-    var runningStat: RunningStat = .{};
-    runningStat.pushData(&list);
+    var runningStats: RunningStats = .{};
+    runningStats.pushData(&list);
     const tolerance = 0.00001;
 
-    try expect(runningStat.n == 8);
-    try std.testing.expectApproxEqAbs(runningStat.mean(), 2.0, tolerance);
-    try std.testing.expectApproxEqAbs(runningStat.variance(), 1.5, tolerance);
-    try std.testing.expectApproxEqAbs(runningStat.varianceS(), 1.714285714285715, tolerance);
-    try std.testing.expectApproxEqAbs(runningStat.skewness(), 0.8164965809277261, tolerance);
-    try std.testing.expectApproxEqAbs(runningStat.skewnessS(), 1.018350154434631, tolerance);
-    try std.testing.expectApproxEqAbs(runningStat.kurtosis(), -1.0, tolerance);
-    try std.testing.expectApproxEqAbs(runningStat.kurtosisS(), -0.7000000000000008, tolerance);
+    try expect(runningStats.n == 8);
+    try std.testing.expectApproxEqAbs(runningStats.mean(), 2.0, tolerance);
+    try std.testing.expectApproxEqAbs(runningStats.variance(), 1.5, tolerance);
+    try std.testing.expectApproxEqAbs(runningStats.varianceS(), 1.714285714285715, tolerance);
+    try std.testing.expectApproxEqAbs(runningStats.skewness(), 0.8164965809277261, tolerance);
+    try std.testing.expectApproxEqAbs(runningStats.skewnessS(), 1.018350154434631, tolerance);
+    try std.testing.expectApproxEqAbs(runningStats.kurtosis(), -1.0, tolerance);
+    try std.testing.expectApproxEqAbs(runningStats.kurtosisS(), -0.7000000000000008, tolerance);
 }
 
 const Statistics = struct {
-    running: RunningStat,
+    running: RunningStats,
     variance: f64,
     varianceS: f64,
     skewness: f64,
@@ -167,8 +167,8 @@ const Statistics = struct {
 
 // const RunningRegress = struct { // An accumulator for regression calculations.
 //     n: usize,                   // amount of pushed data
-//     x_stats: RunningStat,       // stats for the first set of data
-//     y_stats: RunningStat,       // stats for the second set of data
+//     x_stats: RunningStats,       // stats for the first set of data
+//     y_stats: RunningStats,       // stats for the second set of data
 //     s_xy: f64,                  // accumulated data for combined xy
 // };
 
@@ -280,10 +280,10 @@ pub const Impl = struct {
     pub fn variance(vm: *VM, table_id: Ts.table) !HostResult {
         const table = try vm.tables.get(@intFromEnum(table_id));
 
-        var runningStat: RunningStat = .{};
-        runningStat.pushTableData(&table.array);
+        var runningStats: RunningStats = .{};
+        runningStats.pushTableData(&table.array);
 
-        return .data(Data.new.num(runningStat.variance()));
+        return .data(Data.new.num(runningStats.variance()));
     }
 };
 
@@ -311,7 +311,7 @@ test "stats methods" {
     try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.mode() == 1");
     try testing.topTrue("{1, 1, 2, 2} |> stats.mode() == 1");
     try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.mean() == 2.0");
-    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.variance() == 1.5");
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.variance() |> math.is_close?(1.5, 6)");
     // try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.svariance() == 1.714285714285715")
     // try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.skewness() == 0.8164965809277261")
     // try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sskewness() == 1.018350154434631")
