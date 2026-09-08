@@ -19,7 +19,8 @@ const testing = revo.lang.testing;
 const table_methods = table_std.Impl;
 
 
-const RunningStat = struct {                    // An accumulator for statistical data.
+// An accumulator for statistical data.
+const RunningStat = struct {
     // amount of pushed data
     n: usize = 0,
     // self-explaining
@@ -60,6 +61,12 @@ const RunningStat = struct {                    // An accumulator for statistica
     fn pushData(self: *RunningStat, data: *std.ArrayList(f64)) void {
         for (data.items) |value| {
             self.pushEle(value);
+        }
+    }
+
+    fn pushTableData(self: *RunningStat, data: *std.ArrayList(Data)) void {
+        for (data.items) |value| {
+            self.pushEle(value.asNum().?);
         }
     }
 
@@ -267,6 +274,17 @@ pub const Impl = struct {
 
         return .data(mode_val);
     }
+
+    // stats:variance() -> num
+    // Population variance of the data.
+    pub fn variance(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+
+        var runningStat: RunningStat = .{};
+        runningStat.pushTableData(&table.array);
+
+        return .data(Data.new.num(runningStat.variance()));
+    }
 };
 
 pub const impls: []const api.Impl = root.impls(Impl).val;
@@ -280,7 +298,6 @@ pub const impls: []const api.Impl = root.impls(Impl).val;
 // .{ .name = "multimode", .f = root.define(&.{ .table }, multimode) },
 // .{ .name = "quantiles", .f = root.define(&.{.table}, quantiles) },
 // .{ .name = "stdev", .f = root.define(&.{ .table }, stdev) },
-// .{ .name = "variance", .f = root.define(&.{.table}, variance) },
 // .{ .name = "covariance", .f = root.define(&.{ .table }, covariance) },
 // .{ .name = "correlation", .f = root.define(&.{.table}, correlation) },
 // .{ .name = "linear_regression", .f = root.define(&.{.table}, linear_regression) },
@@ -293,6 +310,13 @@ test "stats methods" {
     try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.median() == 1.5");
     try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.mode() == 1");
     try testing.topTrue("{1, 1, 2, 2} |> stats.mode() == 1");
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.mean() == 2.0");
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.variance() == 1.5");
+    // try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.svariance() == 1.714285714285715")
+    // try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.skewness() == 0.8164965809277261")
+    // try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sskewness() == 1.018350154434631")
+    // try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.kurtosis() == -1.0")
+    // try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.skurtosis() == -0.7000000000000008")
 }
 
 // fmean(data, weights=None)
