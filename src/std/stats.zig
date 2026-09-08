@@ -85,10 +85,11 @@ const RunningStats = struct {
         }
 
         const n_float = @as(f64, @floatFromInt(self.n));
+        const nm1_float = @as(f64, @floatFromInt(self.n - 1));
         const delta = x - self.mom1;
         const delta_n = delta / n_float;
         const delta_n2 = delta_n * delta_n;
-        const term1 = delta * delta_n * (n_float - 1);
+        const term1 = delta * delta_n * nm1_float;
         self.mom4 += term1 * delta_n2 * (n_float*n_float - 3*n_float + 3) + 6*delta_n2*self.mom2 - 4*delta_n*self.mom3;
         self.mom3 += term1 * delta_n * (n_float - 2) - 3*delta_n*self.mom2;
         self.mom2 += term1;
@@ -125,8 +126,9 @@ const RunningStats = struct {
 
     fn varianceS(self: *RunningStats) f64 {
         // Computes the current sample variance of `self`.
+        const nm1_float = @as(f64, @floatFromInt(self.n - 1));
         if (self.n > 1) {
-            return self.mom2 / @as(f64, @floatFromInt(self.n - 1));
+            return self.mom2 / nm1_float;
         } else {
             return 0.0;
         }
@@ -151,8 +153,9 @@ const RunningStats = struct {
     fn skewnessS(self: *RunningStats) f64 {
         // Computes the current sample skewness of `self`.
         const n_float = @as(f64, @floatFromInt(self.n));
+        const nm2_float = @as(f64, @floatFromInt(self.n - 2));
         const s2 = self.skewness();
-        return math.sqrt(n_float*(n_float-1))*s2 / (n_float-2);
+        return math.sqrt(n_float*(n_float-1))*s2 / nm2_float;
     }
 
     fn kurtosis(self: *RunningStats) f64 {
@@ -163,8 +166,10 @@ const RunningStats = struct {
 
     fn kurtosisS(self: *RunningStats) f64 {
         // Computes the current sample kurtosis of `self`.
-        const n_float = @as(f64, @floatFromInt(self.n));
-        return (n_float-1) / ((n_float-2)*(n_float-3)) * ((n_float+1)*self.kurtosis() + 6);
+        const nm1_float = @as(f64, @floatFromInt(self.n - 1));
+        const np1_float = @as(f64, @floatFromInt(self.n + 1));
+        const nm2_x_nm3_float = @as(f64, @floatFromInt((self.n - 2)*(self.n - 3)));
+        return nm1_float / nm2_x_nm3_float * (np1_float*self.kurtosis() + 6);
     }
 };
 
