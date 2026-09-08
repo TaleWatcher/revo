@@ -49,7 +49,7 @@ const RunningStats = struct {
         self.n += 1;
         // See Knuth TAOCP vol 2, 3rd edition, page 232
         self.sum += x;
-        self.ssq += x * x
+        self.ssq += x * x;
         if (self.n == 1) {
             self.prd = x;
         } else {
@@ -286,6 +286,61 @@ pub const Impl = struct {
 
         return .data(Data.new.num(runningStats.variance()));
     }
+
+    // stats:sample_variance() -> num
+    // Sample variance of the data.
+    pub fn sample_variance(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+
+        var runningStats: RunningStats = .{};
+        runningStats.pushTableData(&table.array);
+
+        return .data(Data.new.num(runningStats.varianceS()));
+    }
+
+    // stats:skewness() -> num
+    // Population skewness of the data.
+    pub fn skewness(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+
+        var runningStats: RunningStats = .{};
+        runningStats.pushTableData(&table.array);
+
+        return .data(Data.new.num(runningStats.skewness()));
+    }
+
+    // stats:sample_skewness() -> num
+    // Sample skewness of the data.
+    pub fn sample_skewness(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+
+        var runningStats: RunningStats = .{};
+        runningStats.pushTableData(&table.array);
+
+        return .data(Data.new.num(runningStats.skewnessS()));
+    }
+
+    // stats:kurtosis() -> num
+    // Population kurtosis of the data.
+    pub fn kurtosis(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+
+        var runningStats: RunningStats = .{};
+        runningStats.pushTableData(&table.array);
+
+        return .data(Data.new.num(runningStats.kurtosis()));
+    }
+
+    // stats:sample_kurtosis() -> num
+    // Sample kurtosis of the data.
+    pub fn sample_kurtosis(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+
+        var runningStats: RunningStats = .{};
+        runningStats.pushTableData(&table.array);
+
+        return .data(Data.new.num(runningStats.kurtosisS()));
+    }
 };
 
 pub const impls: []const api.Impl = root.impls(Impl).val;
@@ -313,11 +368,11 @@ test "stats methods" {
     try testing.topTrue("{1, 1, 2, 2} |> stats.mode() == 1");
     try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.mean() == 2.0");
     try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.variance() |> math.is_close?(1.5, 6)");
-    // try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.svariance() == 1.714285714285715")
-    // try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.skewness() == 0.8164965809277261")
-    // try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sskewness() == 1.018350154434631")
-    // try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.kurtosis() == -1.0")
-    // try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.skurtosis() == -0.7000000000000008")
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sample_variance() |> math.is_close?(1.714285714285715, 15)");
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.skewness() |> math.is_close?(0.8164965809277261, 16)");
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sample_skewness() |> math.is_close?(1.018350154434631, 15)");
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.kurtosis() |> math.is_close?(-1.0, 1)");
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sample_kurtosis() |> math.is_close?(-0.7000000000000008, 16)");
 }
 
 // fmean(data, weights=None)
