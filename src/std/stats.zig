@@ -94,9 +94,10 @@ const RunningStats = struct {
         self.mom4 += term1 * delta_n2 * (n_float*n_float - 3*n_float + 3) + 6*delta_n2*self.mom2 - 4*delta_n*self.mom3;
         self.mom3 += term1 * delta_n * (n_float - 2) - 3*delta_n*self.mom2;
         self.mom2 += term1;
-        const next_mean = self.mom1 + delta_n;
-        self.mom1_comp = (next_mean - self.mom1) - delta_n;
-        self.mom1 = next_mean;
+        // mean compensation for tail-end precision
+        const next_mom1 = self.mom1 + delta_n;
+        self.mom1_comp = (next_mom1 - self.mom1) - delta_n;
+        self.mom1 = next_mom1;
     }
 
     fn pushData(self: *RunningStats, data: *std.ArrayList(f64)) !void {
@@ -306,6 +307,30 @@ pub const Impl = struct {
         return .data(Data.new.num(runningStats.varianceS()));
     }
 
+    // stats:stdev() -> num
+    // Population standard deviation of the data.
+    pub fn stdev(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+
+        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
+        defer runningStats.deinit();
+        try runningStats.pushTableData(&table.array);
+
+        return .data(Data.new.num(runningStats.standardDeviation()));
+    }
+
+    // stats:sample_stdev() -> num
+    // Sample standard deviation of the data.
+    pub fn sample_stdev(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+
+        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
+        defer runningStats.deinit();
+        try runningStats.pushTableData(&table.array);
+
+        return .data(Data.new.num(runningStats.standardDeviationS()));
+    }
+
     // stats:skewness() -> num
     // Population skewness of the data.
     pub fn skewness(vm: *VM, table_id: Ts.table) !HostResult {
@@ -379,6 +404,8 @@ test "stats methods" {
     try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.mode() == 1");
     try testing.topTrue("{1, 1, 2, 2} |> stats.mode() == 1");
     try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.mean() == 2.0");
+    try testing.topTrue("{1.5, 2.5, 2.5, 2.75, 3.25, 4.75} |> stats.stdev() == 0.986893273527251");
+    try testing.topTrue("{1.5, 2.5, 2.5, 2.75, 3.25, 4.75} |> stats.sample_stdev() == 1.0810874155219827");
     try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.variance() |> math.is_close?(1.5, 6)");
     try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sample_variance() |> math.is_close?(1.714285714285715, 15)");
     try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.skewness() |> math.is_close?(0.8164965809277261, 16)");

@@ -33,6 +33,16 @@ sample variance of the input data
 pub declare stats.sample_variance = fn(self: table<num>) -> num
 
 #*
+population standard deviation of the input data
+*#
+pub declare stats.stdev = fn(self: table<num>) -> num
+
+#*
+sample standard deviation of the input data
+*#
+pub declare stats.sample_stdev = fn(self: table<num>) -> num
+
+#*
 population skewness of the input data
 *#
 pub declare stats.skewness = fn(self: table<num>) -> num
