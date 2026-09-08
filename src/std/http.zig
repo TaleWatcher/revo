@@ -18,8 +18,11 @@ const RedirectBehavior = std.http.Client.Request.RedirectBehavior;
 
 pub const Impl = struct {
     pub fn fetch(vm: *VM, raw_method: Ts.atom, url: Ts.any, opts: Ts.any) !HostResult {
-        const method = buildMethod(raw_method, vm);
-        const response_has_body = methodResponseHasBody(method);
+        // both this and the ambient sig intentionally omit CONNECT,
+        //   bc that opens a tunnel and is not fetch-able
+        const method = try buildMethod(raw_method, vm);
+
+        const response_has_body = method.responseHasBody();
 
         const url_string = switch (try urlToString(url, vm)) {
             .err => |e| return HostResult{ .err = e },
@@ -43,16 +46,17 @@ pub const Impl = struct {
 
         // add body to the request, if provided
         const body = try buildBody(method, opts, vm);
+        defer if (body) |b| {
+            if (b.owned) vm.runtime.alloc.free(b.slice);
+        };
         if (body) |b| {
-            request.payload = b;
-            // default the content type to json if it is not set
-            if (request.headers.content_type == .default) {
-                request.headers.content_type = .{ .override = "application/json" };
-            }
+            request.payload = b.slice;
         }
         var response_writer = std.Io.Writer.Allocating.init(vm.runtime.alloc);
         defer response_writer.deinit();
-        request.response_writer = &response_writer.writer;
+        if (response_has_body) {
+            request.response_writer = &response_writer.writer;
+        }
 
         // add provided headers to the request
         const max_headers = 50;
@@ -64,6 +68,13 @@ pub const Impl = struct {
         };
         request.headers = headers;
         request.extra_headers = extra_headers.items;
+
+        if (body != null) {
+            // default content-type to json
+            if (request.headers.content_type == .default) {
+                request.headers.content_type = .{ .override = "application/json" };
+            }
+        }
 
         // fetch the request and build the result
         const response = try client.fetch(request);
@@ -91,31 +102,15 @@ pub const Impl = struct {
 
 pub const impls = root.impls(Impl).val;
 
-fn buildMethod(raw_method: Ts.atom, vm: *VM) Method {
+fn buildMethod(raw_method: Ts.atom, vm: *VM) !Method {
     const m = vm.stringValue(@intFromEnum(raw_method));
-    if (eqStr("connect", m)) {
-        return .CONNECT;
-    } else if (eqStr("delete", m)) {
-        return .DELETE;
-    } else if (eqStr("get", m)) {
-        return .GET;
-    } else if (eqStr("head", m)) {
-        return .HEAD;
-    } else if (eqStr("options", m)) {
-        return .OPTIONS;
-    } else if (eqStr("patch", m)) {
-        return .PATCH;
-    } else if (eqStr("post", m)) {
-        return .POST;
-    } else if (eqStr("put", m)) {
-        return .PUT;
-    } else if (eqStr("trace", m)) {
-        return .TRACE;
-    } else {
-        // unreachable
-        // TODO: add custom methods?
-        return .GET;
-    }
+
+    var buf: [16]u8 = undefined;
+    if (m.len > buf.len) return error.InvalidMethod;
+    const upper = std.ascii.upperString(&buf, m);
+
+    // TODO: add custom methods?
+    return std.meta.stringToEnum(Method, upper) orelse error.InvalidMethod;
 }
 
 /// normalize url param into a string
@@ -152,19 +147,7 @@ fn buildHeaders(options: Data, extra_headers: *std.ArrayList(std.http.Header), v
                 while (it.next()) |header| {
                     const key = try headerToString(header.key, vm);
                     const val = try headerToString(header.val, vm);
-                    if (eqStr(key, "Host"))
-                        headers.host = .{ .override = val }
-                    else if (eqStr(key, "Authorization"))
-                        headers.authorization = .{ .override = val }
-                    else if (eqStr(key, "User-Agent"))
-                        headers.user_agent = .{ .override = val }
-                    else if (eqStr(key, "Connection"))
-                        headers.connection = .{ .override = val }
-                    else if (eqStr(key, "Accept-Encoding"))
-                        headers.accept_encoding = .{ .override = val }
-                    else if (eqStr(key, "Content-Type"))
-                        headers.content_type = .{ .override = val }
-                    else
+                    if (!setKnownHeader(&headers, key, val))
                         try extra_headers.append(vm.runtime.alloc, Header{ .name = key, .value = val });
                 }
             }
@@ -174,20 +157,48 @@ fn buildHeaders(options: Data, extra_headers: *std.ArrayList(std.http.Header), v
     return .{ .value = headers };
 }
 
-fn buildBody(method: Method, opts: Data, vm: *VM) !?[]const u8 {
-    if (method == .GET or method == .HEAD or method == .TRACE) {
+const known_headers = [_]struct { name: []const u8, field: []const u8 }{
+    .{ .name = "Host", .field = "host" },
+    .{ .name = "Authorization", .field = "authorization" },
+    .{ .name = "User-Agent", .field = "user_agent" },
+    .{ .name = "Connection", .field = "connection" },
+    .{ .name = "Accept-Encoding", .field = "accept_encoding" },
+    .{ .name = "Content-Type", .field = "content_type" },
+};
+
+fn setKnownHeader(headers: *std.http.Client.Request.Headers, key: []const u8, val: []const u8) bool {
+    inline for (known_headers) |kh| {
+        if (std.ascii.eqlIgnoreCase(key, kh.name)) {
+            @field(headers, kh.field) = .{ .override = val };
+            return true;
+        }
+    }
+    return false;
+}
+
+fn buildBody(method: Method, opts: Data, vm: *VM) !?Body {
+    if (!method.requestHasBody()) {
         return null;
     }
     if (opts.asTable()) |o| {
         var options_table = try vm.tables.get(o);
         if (options_table.getRawAtom(try vm.internAtom("body"), vm)) |id| {
             if (id.asStr()) |s| {
-                return vm.stringValue(s);
+                return .{ .slice = vm.stringValue(s) };
             }
+            // anything else is json, the default content-type is json too (TODO detect it)
+            return .{ .slice = try @import("json.zig").encodeAlloc(id, vm), .owned = true };
         }
     }
-    return null;
+
+    return error.BodyRequired;
 }
+
+/// borrowed from vm string unless json
+const Body = struct {
+    slice: []const u8,
+    owned: bool = false,
+};
 
 fn HostErrOr(comptime T: type) type {
     return union(enum) {
@@ -203,22 +214,4 @@ fn headerToString(value: Data, vm: *VM) anyerror![]const u8 {
         .number => try std.fmt.allocPrint(vm.runtime.alloc, "{d}", .{value.asNum().?}),
         else => error.InvalidHeaderType,
     };
-}
-
-fn methodResponseHasBody(method: Method) bool {
-    return switch (method) {
-        .CONNECT => false,
-        .DELETE => true,
-        .GET => true,
-        .HEAD => false,
-        .OPTIONS => true,
-        .PATCH => true,
-        .POST => true,
-        .PUT => true,
-        .TRACE => false,
-    };
-}
-
-fn eqStr(a: []const u8, b: []const u8) bool {
-    return std.mem.eql(u8, a, b);
 }

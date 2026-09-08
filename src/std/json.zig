@@ -23,6 +23,14 @@ pub const Impl = struct {
 
 pub const impls = root.impls(Impl).val;
 
+/// ret owned json string
+pub fn encodeAlloc(data: Data, vm: *VM) ![]const u8 {
+    var out = std.Io.Writer.Allocating.init(vm.runtime.alloc);
+    defer out.deinit();
+    try writeJsonValue(data, vm, &out.writer);
+    return out.toOwnedSlice();
+}
+
 fn writeJsonValue(data: Data, vm: *VM, writer: *std.Io.Writer) anyerror!void {
     return switch (data.tag()) {
         .number => blk: {
