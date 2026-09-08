@@ -214,7 +214,7 @@ pub const Impl = struct {
 
     pub fn @"is_upper?"(vm: *VM, self: Ts.string) !HostResult {
         const str = vm.stringValue(@intFromEnum(self));
-        if (str.len == 0)  return ._bool(false);
+        if (str.len == 0) return ._bool(false);
         for (str) |char| {
             if (!std.ascii.isUpper(char)) return ._bool(false);
         }
@@ -223,7 +223,7 @@ pub const Impl = struct {
 
     pub fn @"is_lower?"(vm: *VM, self: Ts.string) !HostResult {
         const str = vm.stringValue(@intFromEnum(self));
-        if (str.len == 0)  return ._bool(false);
+        if (str.len == 0) return ._bool(false);
         for (str) |char| {
             if (!std.ascii.isLower(char)) return ._bool(false);
         }

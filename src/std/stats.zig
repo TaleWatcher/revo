@@ -18,7 +18,6 @@ const Table = revo.table.Table;
 const testing = revo.lang.testing;
 const table_methods = table_std.Impl;
 
-
 // An accumulator for statistical data.
 const RunningStats = struct {
     // amount of pushed data
@@ -91,8 +90,8 @@ const RunningStats = struct {
         const delta_n = (delta / n_float) - self.mom1_comp;
         const delta_n2 = delta_n * delta_n;
         const term1 = delta * delta_n * nm1_float;
-        self.mom4 += term1 * delta_n2 * (n_float*n_float - 3*n_float + 3) + 6*delta_n2*self.mom2 - 4*delta_n*self.mom3;
-        self.mom3 += term1 * delta_n * (n_float - 2) - 3*delta_n*self.mom2;
+        self.mom4 += term1 * delta_n2 * (n_float * n_float - 3 * n_float + 3) + 6 * delta_n2 * self.mom2 - 4 * delta_n * self.mom3;
+        self.mom3 += term1 * delta_n * (n_float - 2) - 3 * delta_n * self.mom2;
         self.mom2 += term1;
         // mean compensation for tail-end precision
         const next_mom1 = self.mom1 + delta_n;
@@ -159,7 +158,7 @@ const RunningStats = struct {
         const n_float = @as(f64, @floatFromInt(self.n));
         const nm2_float = @as(f64, @floatFromInt(self.n - 2));
         const s2 = self.skewness();
-        return math.sqrt(n_float*(n_float-1))*s2 / nm2_float;
+        return math.sqrt(n_float * (n_float - 1)) * s2 / nm2_float;
     }
 
     fn kurtosis(self: *RunningStats) f64 {
@@ -172,8 +171,8 @@ const RunningStats = struct {
         // Computes the current sample kurtosis of `self`.
         const nm1_float = @as(f64, @floatFromInt(self.n - 1));
         const np1_float = @as(f64, @floatFromInt(self.n + 1));
-        const nm2_x_nm3_float = @as(f64, @floatFromInt((self.n - 2)*(self.n - 3)));
-        return nm1_float / nm2_x_nm3_float * (np1_float*self.kurtosis() + 6);
+        const nm2_x_nm3_float = @as(f64, @floatFromInt((self.n - 2) * (self.n - 3)));
+        return nm1_float / nm2_x_nm3_float * (np1_float * self.kurtosis() + 6);
     }
 };
 
@@ -183,7 +182,7 @@ test "RunningStats struct and methods" {
 
     var list: std.ArrayList(f64) = .empty;
     defer list.deinit(a);
-    try list.appendSlice(a, &.{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0});
+    try list.appendSlice(a, &.{ 1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0 });
 
     var runningStats: RunningStats = RunningStats.init(a);
     defer runningStats.deinit();
@@ -221,12 +220,8 @@ pub const Impl = struct {
         try runningStats.pushTableData(&table.array);
 
         var freq_it = runningStats.freq.iterator();
-        while(freq_it.next()) |entry| {
-            try result_table.put(
-                result_table_id, vm,
-                Data.new.num(@as(f64, @bitCast(entry.key_ptr.*))),
-                Data.new.num(entry.value_ptr.*)
-            );
+        while (freq_it.next()) |entry| {
+            try result_table.put(result_table_id, vm, Data.new.num(@as(f64, @bitCast(entry.key_ptr.*))), Data.new.num(entry.value_ptr.*));
         }
 
         return .data(Data.new.table(result_table_id));
@@ -393,12 +388,8 @@ pub const Impl = struct {
         try runningStats.pushTableData(&table.array);
 
         var freq_it = runningStats.freq.iterator();
-        while(freq_it.next()) |entry| {
-            try freq_table.put(
-                freq_table_id, vm,
-                Data.new.num(@as(f64, @bitCast(entry.key_ptr.*))),
-                Data.new.num(entry.value_ptr.*)
-            );
+        while (freq_it.next()) |entry| {
+            try freq_table.put(freq_table_id, vm, Data.new.num(@as(f64, @bitCast(entry.key_ptr.*))), Data.new.num(entry.value_ptr.*));
         }
 
         try result_table.put(result_table_id, vm, try vm.dataAtom("frequencies"), Data.new.table(freq_table_id));
