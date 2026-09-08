@@ -93,7 +93,7 @@ pub fn dofile(args: []const Data, vm: *VM) !HostResult {
         vm.runtime.alloc,
         .limited(fs.max_read_size),
     ) catch |err| {
-        const msg = try vm.ownDataString(fs.mapIOError(err));
+        const msg = try vm.ownDataString(@errorName(err));
         return HostResult.errData(vm, msg);
     };
     defer vm.runtime.alloc.free(source);
