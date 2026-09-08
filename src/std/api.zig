@@ -113,15 +113,14 @@ pub var full_specs: []const []const FnSpec = &.{};
 
 var permanent_cache: ?[]const []const FnSpec = null;
 
-pub fn loadAllSpecs(_: std.mem.Allocator) ![]const []const FnSpec {
+pub fn loadAllSpecs(caller_alloc: std.mem.Allocator) ![]const []const FnSpec {
     if (permanent_cache) |cached| {
         full_specs = cached;
         return cached;
     }
 
-    // first call: parse with page_allocator so the permanent cache doesn't
-    // leak through the caller's (potentially debug) allocator
-    const pa = std.heap.page_allocator;
+    const pa = if (revo.is_freestanding) caller_alloc else std.heap.page_allocator;
+
     var groups = try std.ArrayList([]const FnSpec).initCapacity(pa, impl_groups.len);
     errdefer {
         for (groups.items) |g| {
