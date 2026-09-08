@@ -1,0 +1,3 @@
+#* fetch an http request *#
+pub declare http.fetch = fn(method: :connect | :delete | :get | :head | :options | :patch | :post | :put | :trace, url: any, opts: table) -> !string
+
