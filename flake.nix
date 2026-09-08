@@ -1,22 +1,31 @@
 {
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs";
+  description = "revo, the programming language";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
   outputs =
     { self, nixpkgs }:
     let
+      inherit (nixpkgs.lib) genAttrs;
       systems = [
         "x86_64-linux"
         "aarch64-linux"
         "aarch64-darwin"
       ];
-      forEachSystem = nixpkgs.lib.genAttrs systems;
+      forSystem =
+        f: system:
+        f system (
+          import nixpkgs {
+            inherit system;
+            overlays = [ self.overlays.default ];
+          }
+        );
+      forEachSystem = f: genAttrs systems (forSystem f);
     in
     {
-      packages = forEachSystem (
-        system:
-        with nixpkgs.legacyPackages.${system};
-        rec {
-          revo = stdenv.mkDerivation {
+      overlays.default = final: _prev: {
+        revo = final.callPackage (
+          { stdenv, zig }:
+          stdenv.mkDerivation {
             name = "revo";
             version = "git";
             src = ./.;
@@ -33,43 +42,70 @@
                 };
               in
               "ln -s ${zigDeps} $ZIG_GLOBAL_CACHE_DIR/p";
-          };
-          revo-small = revo.overrideAttrs { zigBuildFlags = [ "-Dfeatures=" "-Doptimize=ReleaseSmall" ]; };
-          default = revo;
+          }
+        ) { };
 
-          build =
-            {
-              name,
-              version,
-              src,
-              entry-point ? "main",
-              revo ? revo-small,
-            }:
-            stdenv.mkDerivation {
-              inherit name version src;
-              nativeBuildInputs = [ makeWrapper ];
-              installPhase = ''
-                mkdir -p $out/revo
-                cp -r * $out/revo
-                mkdir $out/bin
-                makeWrapper "${revo}/bin/revo" "$out/bin/${name}" --add-flags "$out/revo/${entry-point}.rv"
-              '';
-            };
-          build-test = build {
+        revo-small = final.revo.overrideAttrs {
+          zigBuildFlags = [
+            "-Dfeatures="
+            "-Doptimize=ReleaseSmall"
+          ];
+        };
+
+        buildRevoModule = final.callPackage (
+          {
+            stdenv,
+            makeWrapper,
+            revo-small,
+          }:
+          {
+            name,
+            version,
+            src,
+            entry-point ? "main",
+            revo ? revo-small,
+          }:
+          stdenv.mkDerivation {
+            inherit name version src;
+            nativeBuildInputs = [ makeWrapper ];
+            installPhase = ''
+              mkdir -p $out/revo
+              cp -r * $out/revo
+              mkdir $out/bin
+              makeWrapper "${revo}/bin/revo" "$out/bin/${name}" --add-flags "$out/revo/${entry-point}.rv"
+            '';
+          }
+        ) { };
+      };
+      checks = forEachSystem (
+        _: pkgs: {
+          test = pkgs.revo.overrideAttrs (old: {
+            name = "revo-check";
+            doCheck = true;
+          });
+        }
+      );
+      packages = forEachSystem (
+        _: pkgs: {
+          inherit (pkgs) revo revo-small;
+          default = pkgs.revo;
+          modules = pkgs.buildRevoModule {
             name = "modules";
             version = "git";
             src = ./examples/modules;
           };
         }
       );
-      devShells = forEachSystem (system: {
-        default = nixpkgs.legacyPackages.${system}.mkShellNoCC {
-          packages = with nixpkgs.legacyPackages.${system}; [
-            zig
-            zig-zlint
-            zls
-          ];
-        };
-      });
+      devShells = forEachSystem (
+        _: pkgs: {
+          default = pkgs.mkShellNoCC {
+            packages = with pkgs; [
+              zig
+              zig-zlint
+              zls
+            ];
+          };
+        }
+      );
     };
 }

@@ -21,3 +21,7 @@ __pycache__
 # gets tangled by default
 Emacs.el
 _ign*
+
+# nix build artifacts
+result
+result-*
