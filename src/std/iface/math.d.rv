@@ -72,3 +72,6 @@ pub declare math.exp = fn(x: num) -> num
 #* sign of value (-1, 0, 1) *#
 pub declare math.sign = fn(value: num) -> num
 
+#* test whether two values are close within the given number of decimal places *#
+pub declare math.is_close? = fn(x: num, y: num, places: num) -> num
+
