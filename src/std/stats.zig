@@ -214,7 +214,7 @@ pub const Impl = struct {
         const table = try vm.tables.get(@intFromEnum(table_id));
 
         const result_table_id = try vm.tables.create();
-        const result = try vm.tables.get(result_table_id);
+        const result_table = try vm.tables.get(result_table_id);
 
         var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
         defer runningStats.deinit();
@@ -222,7 +222,7 @@ pub const Impl = struct {
 
         var freq_it = runningStats.freq.iterator();
         while(freq_it.next()) |entry| {
-            try result.put(
+            try result_table.put(
                 result_table_id, vm,
                 Data.new.num(@as(f64, @bitCast(entry.key_ptr.*))),
                 Data.new.num(entry.value_ptr.*)
@@ -377,6 +377,44 @@ pub const Impl = struct {
         try runningStats.pushTableData(&table.array);
 
         return .data(Data.new.num(runningStats.kurtosisS()));
+    }
+
+    // stats:statistics() -> num
+    // Sample kurtosis of the data.
+    pub fn statistics(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+        const result_table_id = try vm.tables.create();
+        const result_table = try vm.tables.get(result_table_id);
+        const freq_table_id = try vm.tables.create();
+        const freq_table = try vm.tables.get(freq_table_id);
+
+        var runningStats: RunningStats = RunningStats.init(vm.runtime.alloc);
+        defer runningStats.deinit();
+        try runningStats.pushTableData(&table.array);
+
+        var freq_it = runningStats.freq.iterator();
+        while(freq_it.next()) |entry| {
+            try freq_table.put(
+                freq_table_id, vm,
+                Data.new.num(@as(f64, @bitCast(entry.key_ptr.*))),
+                Data.new.num(entry.value_ptr.*)
+            );
+        }
+
+        try result_table.put(result_table_id, vm, try vm.dataAtom("frequencies"), Data.new.table(freq_table_id));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("mean"), Data.new.num(runningStats.mean()));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("median"), (try median(vm, table_id)).ok);
+        try result_table.put(result_table_id, vm, try vm.dataAtom("mode"), Data.new.num(runningStats.mode()));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("stdev"), Data.new.num(runningStats.standardDeviation()));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("sample_stdev"), Data.new.num(runningStats.standardDeviationS()));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("variance"), Data.new.num(runningStats.variance()));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("sample_variance"), Data.new.num(runningStats.varianceS()));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("skewness"), Data.new.num(runningStats.skewness()));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("sample_skewness"), Data.new.num(runningStats.skewnessS()));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("kurtosis"), Data.new.num(runningStats.kurtosis()));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("sample_kurtosis"), Data.new.num(runningStats.kurtosisS()));
+
+        return .data(Data.new.table(result_table_id));
     }
 };
 
