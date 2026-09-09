@@ -20,7 +20,7 @@ pub declare stats.median = fn(input: table<num>) -> num
 #*
 most frequent occuring value of input data
 *#
-pub declare stats.mode = fn(input: table<num>) -> num
+pub declare stats.mode = fn(input: table<any>) -> num
 
 #*
 population variance of the input data

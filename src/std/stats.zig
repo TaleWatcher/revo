@@ -244,6 +244,11 @@ pub const Impl = struct {
     /// > stats.frequencies(table) -> table<any>
     /// returns a histogram of element frequencies as table (ele: freq)
     pub fn frequencies(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+        for (table.array.items) |ele| {
+            if (!ele.isNumber()) return nonnumeric_frequencies(vm, table_id);
+        }
+
         var runningStats = buildStats(vm, table_id) catch |e| return statsErrResult(e);
         defer runningStats.deinit();
 
@@ -253,6 +258,22 @@ pub const Impl = struct {
         var freq_it = runningStats.freq.iterator();
         while (freq_it.next()) |entry| {
             try result_table.put(result_table_id, vm, Data.new.num(@as(f64, @bitCast(entry.key_ptr.*))), Data.new.num(entry.value_ptr.*));
+        }
+
+        return .data(Data.new.table(result_table_id));
+    }
+
+    fn nonnumeric_frequencies(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+        const result_table_id = try vm.tables.create();
+        const result = try vm.tables.get(result_table_id);
+
+        for (table.array.items) |ele| {
+            if (try result.get(ele, vm)) |this_count_data| {
+                try result.put(result_table_id, vm, ele, Data.new.num(this_count_data.asNum().? + 1));
+            } else {
+                try result.put(result_table_id, vm, ele, Data.new.num(1));
+            }
         }
 
         return .data(Data.new.table(result_table_id));
@@ -298,7 +319,53 @@ pub const Impl = struct {
     // stats.mode(table) -> num
     // Most frequent occuring value of input data.
     pub fn mode(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+
+        if (table.array.items.len == 0) {
+            return .errType(
+                0,
+                "table with at least 1 element",
+                "no mode for empty table",
+            );
+        }
+
+        for (table.array.items) |ele| {
+            if (!ele.isNumber()) return nonnumeric_mode(vm, table_id);
+        }
         return numStat(vm, table_id, RunningStats.mode);
+    }
+
+    fn nonnumeric_mode(vm: *VM, table_id: Ts.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(table_id));
+        const data = table.array.items;
+
+        var freq = std.AutoHashMap(Data, usize).init(vm.runtime.alloc);
+        defer freq.deinit();
+
+        var mode_val: Data = data[0];
+        var max_freq: usize = 0;
+
+        for (data) |value| {
+            const entry = try freq.getOrPut(value);
+
+            if (!entry.found_existing) {
+                entry.value_ptr.* = 1;
+            } else {
+                entry.value_ptr.* += 1;
+            }
+
+            const count = entry.value_ptr.*;
+
+            // match numpy behaviour, on ties it'll choose the smaller value
+            if (count > max_freq or
+                (count == max_freq and vm.compare(value, mode_val) == .lt))
+            {
+                max_freq = count;
+                mode_val = value;
+            }
+        }
+
+        return .data(mode_val);
     }
 
     // stats.variance(table) -> num
@@ -399,10 +466,12 @@ pub const impls: []const api.Impl = root.impls(Impl).val;
 
 test "stats methods" {
     try testing.topTrue("{1, 1, 1, 2, 3, 3} |> stats.frequencies() == {1=3, 2=1, 3=2}");
+    try testing.topTrue("{\"hello\", \"world\", \"how say\", \"hello\",} |> stats.frequencies() == {\"hello\"=2, \"world\"=1, \"how say\"=1}");
     try testing.topTrue("{1, 1, 1, 2, 3} |> stats.mean() == 1.6");
     try testing.topTrue("{3, 1, 2, 1, 1} |> stats.median() == 1");
     try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.median() == 1.5");
     try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.mode() == 1");
+    try testing.topTrue("{\"hello\", \"world\", \"how say\", \"hello\",} |> stats.mode() == \"hello\"");
     try testing.topTrue("{1, 1, 2, 2} |> stats.mode() == 1");
     try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.mean() == 2.0");
     try testing.topTrue("{1.5, 2.5, 2.5, 2.75, 3.25, 4.75} |> stats.stdev() == 0.986893273527251");
