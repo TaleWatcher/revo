@@ -6,7 +6,6 @@ const Compiler = revo.lang.compiler.Compiler;
 
 const ast = @import("../ast.zig");
 const Node = ast.Node;
-const TableEntry = ast.TableEntry;
 const StructItem = ast.StructItem;
 const flow = @import("flow.zig");
 const state = @import("state.zig");

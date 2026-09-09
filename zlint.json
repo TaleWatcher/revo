@@ -6,7 +6,8 @@
 		"zig-pkg",
 		"src/std",
 		"src/main_wasm.zig",
-		"examples"
+		"examples",
+		"notes"
 	],
 	"rules": {
 		"avoid-as": "warn",

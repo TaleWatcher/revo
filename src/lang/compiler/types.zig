@@ -717,11 +717,17 @@ fn inferTableType(ctx: anytype, entries: []const ast.TableEntry) TypeInfo {
     var fields = std.ArrayList(RecordField).initCapacity(ctx.alloc, entries.len) catch return .{ .tag = .any };
 
     for (entries) |entry| {
-        // method definitions carry no value type
+        // method defs are record fields with their fn type
+        // they carry no value type contribution
         if (entry.key == null and entry.value.expr == .decl and
             entry.value.expr.decl.inner.expr == .binding and
             entry.value.expr.decl.inner.expr.binding.value.expr == .fn_expr)
         {
+            const binding = entry.value.expr.decl.inner.expr.binding;
+            const method_name = if (binding.target.expr == .ident) binding.target.expr.ident else continue;
+            const fn_type = inferExprType(ctx, binding.value);
+
+            fields.append(ctx.alloc, .{ .name = method_name, .field_type = fn_type }) catch return .{ .tag = .any };
             continue;
         }
         const field_type = inferExprType(ctx, entry.value);
