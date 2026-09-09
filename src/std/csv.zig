@@ -148,7 +148,7 @@ fn buildOpts(raw_opts: Ts.table, vm: *VM) !HostErrOr(Dialect) {
             if (delim.len == 1) {
                 dialect.delimiter = delim[0];
             } else {
-                return .{ .err = HostResult.errType(@intFromEnum(raw_opts), "single character", delim).err };
+                return .{ .err = HostResult.other("wants single character delimiter").err };
             }
         }
     }
@@ -158,7 +158,7 @@ fn buildOpts(raw_opts: Ts.table, vm: *VM) !HostErrOr(Dialect) {
             if (terminator.len == 1) {
                 dialect.terminator = .{ .octet = terminator[0] };
             } else {
-                return .{ .err = HostResult.errType(@intFromEnum(raw_opts), "single character", terminator).err };
+                return .{ .err = HostResult.other("wants single character terminator").err };
             }
         }
     }
@@ -168,7 +168,7 @@ fn buildOpts(raw_opts: Ts.table, vm: *VM) !HostErrOr(Dialect) {
             if (quote.len == 1) {
                 dialect.quote = quote[0];
             } else {
-                return .{ .err = HostResult.errType(@intFromEnum(raw_opts), "single character", quote).err };
+                return .{ .err = HostResult.other("wants single character quote").err };
             }
         } else if (id.asAtom()) |quote_id| {
             if (quote_id == @intFromEnum(revo.core_atoms.nil)) {
