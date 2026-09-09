@@ -5,65 +5,65 @@ statistics functions
 #*
 counts frequencies of elements in an array table and returns a mapping of elements to their counts
 *#
-pub declare stats.frequencies = fn(self: table<any>) -> table<any, int>
+pub declare stats.frequencies = fn(input: table<any>) -> table<any, int>
 
 #*
 calculates the arithmetic mean of an array of numbers
 *#
-pub declare stats.mean = fn(self: table<num>) -> num
+pub declare stats.mean = fn(input: table<num>) -> num
 
 #*
 middle value of input data
 *#
-pub declare stats.median = fn(self: table<num>) -> num
+pub declare stats.median = fn(input: table<num>) -> num
 
 #*
 most frequent occuring value of input data
 *#
-pub declare stats.mode = fn(self: table<num>) -> num
+pub declare stats.mode = fn(input: table<num>) -> num
 
 #*
 population variance of the input data
 *#
-pub declare stats.variance = fn(self: table<num>) -> num
+pub declare stats.variance = fn(input: table<num>) -> num
 
 #*
 sample variance of the input data
 *#
-pub declare stats.sample_variance = fn(self: table<num>) -> num
+pub declare stats.sample_variance = fn(input: table<num>) -> num
 
 #*
 population standard deviation of the input data
 *#
-pub declare stats.stdev = fn(self: table<num>) -> num
+pub declare stats.stdev = fn(input: table<num>) -> num
 
 #*
 sample standard deviation of the input data
 *#
-pub declare stats.sample_stdev = fn(self: table<num>) -> num
+pub declare stats.sample_stdev = fn(input: table<num>) -> num
 
 #*
 population skewness of the input data
 *#
-pub declare stats.skewness = fn(self: table<num>) -> num
+pub declare stats.skewness = fn(input: table<num>) -> num
 
 #*
 sample skewness of the input data
 *#
-pub declare stats.sample_skewness = fn(self: table<num>) -> num
+pub declare stats.sample_skewness = fn(input: table<num>) -> num
 
 #*
 population kurtosis of the input data
 *#
-pub declare stats.kurtosis = fn(self: table<num>) -> num
+pub declare stats.kurtosis = fn(input: table<num>) -> num
 
 #*
 sample kurtosis of the input data
 *#
-pub declare stats.sample_kurtosis = fn(self: table<num>) -> num
+pub declare stats.sample_kurtosis = fn(input: table<num>) -> num
 
 
 #*
 table of all statistics of the input data
 *#
-pub declare stats.statistics = fn(self: table<num>) -> table
+pub declare stats.statistics = fn(input: table<num>) -> table

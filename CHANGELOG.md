@@ -9,10 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- std:
+  - overhauled `fs` module
+    - `fs.open(path, mode?)`: mode is `"r"` (default, opens existing), `"w"`
+      (creates or truncates), `"a"` (creates or keeps)
+    - `fs.remove(path, recursive?)`: `:true` deletes the whole tree
+    - `fs.mkdir(path, parents?, permissions?)`: `:true` creates missing parents like `mkdir -p`, replacing `fs.mkdirs`
+    - `file.write(self, data, append?, permissions?)`: `:true` appends instead of overwriting, replacing `file.append`
+    - `file.stat` / `fs.stat` take `follow?` (`:false` leaves symlinks alone, replacing `lstat`)
+    - `fs.exists?` returns plain `bool` instead of `!bool`
+    - `fs.touch(path)`, `fs.copy(src, dst)`
+    - paths starting with `~/` expand to the home directory across all `fs` functions
+    - **Breaking:** error unions always come back as tuples, with zig error names (`:FileNotFound`, `:DirNotEmpty`, …);
+      programmer errors (bad mode, bad permissions, `~user` paths, non-handles) raise instead (this is something every host function should do btw)
+    - **Breaking:** `mkdir`/`write` permissions are `num?` now, `write` data is `string`
+
 ### Changed
 
 ### Fixed
 
+- host functions dropped explicit `:false` bool args: `unwrapArg` used `isBoolAtom` (true for both `:true`
+  and `:false`) as the value instead of comparing against `:true`
 - `promote.zig`'s `[8]Register` buffer was too small for `call_field`
   instructions with too many args
 - `const x = import "raylib.so"` named imports now get the fields from the module's

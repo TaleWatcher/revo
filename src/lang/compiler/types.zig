@@ -2126,20 +2126,18 @@ test "stdlib sigs untyped call still validates arg count" {
 }
 
 test "stdlib sigs: module field calls resolve to spec sigs" {
-    try t.topAtom("fs.exists?(\"/definitely/not/a/real/path_xyz\")?", "false");
+    try t.topAtom("fs.exists?(\"/definitely/not/a/real/path_xyz\")", "false");
     try t.topNumber(
         \\ table.len({1, 2}) + 1
     , 3);
-    try t.expectCompileError(
-        \\ let b: bool = fs.exists?("/tmp")
-    , .ParseError);
+    try t.topTrue("let b: bool = fs.exists?(\"/tmp\")");
 }
 
 test "stdlib sigs: module result flows through match" {
     try t.topAtom(
-        \\ let r = fs.exists?("/tmp")
-        \\ match r | (:ok, v) => v | (:err, e) => panic(e)
-    , "true");
+        \\ let r = fs.open("/definitely/not/a/real/path_xyz")
+        \\ match r | (:ok, f) => :found | (:err, e) => e
+    , "FileNotFound");
 }
 
 test "stdlib sigs: local binding shadows stdlib module" {
@@ -2157,11 +2155,11 @@ test "stdlib sigs: try unwraps tagged tuples" {
         \\ fn res() (:ok, 5)
         \\ res()? + 1
     , 6);
-    try t.topTrue("let b: bool = fs.exists?(\"/tmp\")?");
+    try t.topTrue("let b: bool = fs.exists?(\"/tmp\")");
 }
 
 test "stdlib sigs: orelse unwraps results" {
-    try t.topTrue("fs.exists?(\"/tmp\") orelse :false");
+    try t.topTrue("fs.exists?(\"/tmp\")");
     try t.topNumber("(:err, \"boom\") orelse 5", 5);
 }
 
@@ -2176,35 +2174,33 @@ test "stdlib sigs: match narrows call-subject payloads" {
     // the subject is a call, not an ident: the payload still narrows to
     // bool, so the match result is bool (not a result) and `?` is rejected
     try t.expectCompileError(
-        \\ (match fs.exists?("/tmp")
+        \\ (match fs.open("/tmp")
         \\ | (:ok, v) => v
         \\ | (:err, e) => panic(e))?
     , .ParseError);
 }
 
 test "eu.rv: result types flow end to end" {
-    // every line of the eu.rv table: the result binds as !bool, `?` unwraps
-    // to bool, and the match over it is the :ok payload
+    // the predicate binds as bool, while result calls still bind as !T
+    // and flow through match on both arms
     try t.topTrue(
-        \\ let x: !bool = fs.exists?("/tmp")
-        \\ let b: bool = fs.exists?("/tmp")?
-        \\ let r = fs.exists?("/tmp")
-        \\ match r
-        \\ | (:ok, v) => v
-        \\ | (:err, e) => panic(e)
+        \\ let x: bool = fs.exists?("/tmp")
+        \\ x
     );
+    try t.topAtom(
+        \\ let r = fs.open("/definitely/not/a/real/path_xyz")
+        \\ match r | (:err, e) => e | _ => :found
+    , "FileNotFound");
 }
 
 test "error-union sugar and the literal form are the same union" {
-    // `!bool` and `(:ok, bool) | (:err, any)` are structurally identical, so
+    // `!table` and `(:ok, table) | (:err, any)` are structurally identical, so
     // a value typed with one can be bound to a slot typed with the other
-    try t.topTrue(
-        \\ let x: (:ok, bool) | (:err, any) = fs.exists?("/tmp")
-        \\ let y: !bool = x
-        \\ match y
-        \\ | (:ok, v) => v
-        \\ | (:err, e) => panic(e)
-    );
+    try t.topAtom(
+        \\ let x: (:ok, table) | (:err, any) = fs.open("/tmp")
+        \\ let y: !table = x
+        \\ match y | (:ok, t) => :found | (:err, e) => e
+    , "found");
 }
 
 //

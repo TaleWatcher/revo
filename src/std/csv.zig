@@ -11,14 +11,21 @@ const csv = @import("./vendor/csv.zig");
 const Reader = csv.Reader;
 const Writer = csv.Writer;
 const Record = csv.Record;
+const Dialect = csv.Dialect;
 
 const Ts = root.T;
 
 pub const Impl = struct {
-    pub fn encode(vm: *VM, data: Ts.any) !HostResult {
+    pub fn encode(vm: *VM, data: Ts.any, raw_opts: Ts.table) !HostResult {
+        const dialect = switch (try buildOpts(raw_opts, vm)) {
+            .err => |e| return HostResult{ .err = e },
+            .value => |v| v,
+        };
+
         var buffer = std.Io.Writer.Allocating.init(vm.runtime.alloc);
         defer buffer.deinit();
-        var writer = Writer.init(&buffer.writer, .{});
+
+        var writer = Writer.init(&buffer.writer, dialect);
         try writeCsvValue(data, vm, &writer, false);
 
         const slice = try buffer.toOwnedSlice();
@@ -26,10 +33,15 @@ pub const Impl = struct {
         return HostResult.Ok(vm, result);
     }
 
-    pub fn decode(vm: *VM, source: Ts.string) !HostResult {
+    pub fn decode(vm: *VM, source: Ts.string, raw_opts: Ts.table) !HostResult {
+        const dialect = switch (try buildOpts(raw_opts, vm)) {
+            .err => |e| return HostResult{ .err = e },
+            .value => |v| v,
+        };
+
         const str = vm.stringValue(@intFromEnum(source));
         var fixed_reader = std.Io.Reader.fixed(str);
-        var reader = Reader.init(&fixed_reader, .{});
+        var reader = Reader.init(&fixed_reader, dialect);
 
         const table_id = try vm.tables.create();
 
@@ -125,4 +137,60 @@ test "csv encode" {
     try testing.topString(
         \\ csv.encode(({"a", :b, 3}, {1.2, 0.3, "1.2"}, (1,2,3))):unwrap()
     , "a,b,3\r\n1.2,0.3,1.2\r\n1,2,3\r\n");
+}
+
+fn buildOpts(raw_opts: Ts.table, vm: *VM) !HostErrOr(Dialect) {
+    var dialect = Dialect{};
+    const opts = try vm.tables.get(@intFromEnum(raw_opts));
+    if (opts.getRawAtom(try vm.internAtom("delimiter"), vm)) |id| {
+        if (id.asStr()) |delim_id| {
+            const delim = vm.stringValue(delim_id);
+            if (delim.len == 1) {
+                dialect.delimiter = delim[0];
+            } else {
+                return .{ .err = HostResult.other("wants single character delimiter").err };
+            }
+        }
+    }
+    if (opts.getRawAtom(try vm.internAtom("terminator"), vm)) |id| {
+        if (id.asStr()) |terminator_id| {
+            const terminator = vm.stringValue(terminator_id);
+            if (terminator.len == 1) {
+                dialect.terminator = .{ .octet = terminator[0] };
+            } else {
+                return .{ .err = HostResult.other("wants single character terminator").err };
+            }
+        }
+    }
+    if (opts.getRawAtom(try vm.internAtom("quote"), vm)) |id| {
+        if (id.asStr()) |quote_id| {
+            const quote = vm.stringValue(quote_id);
+            if (quote.len == 1) {
+                dialect.quote = quote[0];
+            } else {
+                return .{ .err = HostResult.other("wants single character quote").err };
+            }
+        } else if (id.asAtom()) |quote_id| {
+            if (quote_id == @intFromEnum(revo.core_atoms.nil)) {
+                dialect.quote = null;
+            }
+        }
+    }
+    if (opts.getRawAtom(try vm.internAtom("bom"), vm)) |id| {
+        if (id.asAtom()) |bom_id| {
+            if (bom_id == @intFromEnum(revo.core_atoms.true)) {
+                dialect.bom = true;
+            }
+        } else {
+            return .{ .err = HostResult.errType(@intFromEnum(raw_opts), ":true or :false", revo.std_lib.typeof(id, vm)).err };
+        }
+    }
+    return .{ .value = dialect };
+}
+
+fn HostErrOr(comptime T: type) type {
+    return union(enum) {
+        value: T,
+        err: revo.std_lib.HostErrPayload,
+    };
 }

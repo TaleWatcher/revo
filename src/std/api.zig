@@ -113,15 +113,14 @@ pub var full_specs: []const []const FnSpec = &.{};
 
 var permanent_cache: ?[]const []const FnSpec = null;
 
-pub fn loadAllSpecs(_: std.mem.Allocator) ![]const []const FnSpec {
+pub fn loadAllSpecs(caller_alloc: std.mem.Allocator) ![]const []const FnSpec {
     if (permanent_cache) |cached| {
         full_specs = cached;
         return cached;
     }
 
-    // first call: parse with page_allocator so the permanent cache doesn't
-    // leak through the caller's (potentially debug) allocator
-    const pa = std.heap.page_allocator;
+    const pa = if (revo.is_freestanding) caller_alloc else std.heap.page_allocator;
+
     var groups = try std.ArrayList([]const FnSpec).initCapacity(pa, impl_groups.len);
     errdefer {
         for (groups.items) |g| {
@@ -138,13 +137,13 @@ pub fn loadAllSpecs(_: std.mem.Allocator) ![]const []const FnSpec {
             if (i > 0) for (specs[0..i]) |other| {
                 if (std.mem.eql(u8, other.name, s.name)) k += 1;
             };
-            s.f = implFor(ig.impls, s.name, k) orelse {
-                std.debug.print("missing {s}\n", .{s.name});
+            s.f = implFor(ig.impls, s, k) orelse {
+                std.debug.print("missing {s}\n", .{s.sig});
                 @panic("missing an std def");
             };
         }
         for (ig.impls) |imp| {
-            if (findIn(specs, imp.name) == null) return error.StdlibImplUnused;
+            if (findSpec(specs, imp.name) == null) return error.StdlibImplUnused;
         }
         try groups.append(pa, specs);
     }
@@ -165,20 +164,32 @@ fn ifaceSrc(name: []const u8) []const u8 {
     return "";
 }
 
-/// the k-th spec with this name takes the k-th impl with the same name
-fn implFor(impls: []const Impl, name: []const u8, k: usize) ?HostFunc {
+/// callable head of sig: `fs.open(path: string)` -> `fs.open`
+fn specHead(sig: []const u8) []const u8 {
+    const end = std.mem.indexOfScalar(u8, sig, '(') orelse sig.len;
+    var head = sig[0..end];
+    if (std.mem.indexOfScalar(u8, head, '[')) |open| head = head[0..open];
+    return head;
+}
+
+/// impl registered under the full head like `f nfs.stat` pairs outright
+/// otherwise the k-th spec with this name takes the k-th bare-named impl
+fn implFor(impls: []const Impl, spec: *const FnSpec, k: usize) ?HostFunc {
+    const head = specHead(spec.sig);
+    for (impls) |imp| if (std.mem.eql(u8, imp.name, head)) return imp.f;
     var seen: usize = 0;
     for (impls) |imp| {
-        if (!std.mem.eql(u8, imp.name, name)) continue;
+        if (!std.mem.eql(u8, imp.name, spec.name)) continue;
         if (seen == k) return imp.f;
         seen += 1;
     }
     return null;
 }
 
-fn findIn(specs: []const FnSpec, name: []const u8) ?*const FnSpec {
+fn findSpec(specs: []const FnSpec, impl_name: []const u8) ?*const FnSpec {
     for (specs) |*s| {
-        if (std.mem.eql(u8, s.name, name)) return s;
+        if (std.mem.eql(u8, s.name, impl_name)) return s;
+        if (std.mem.eql(u8, specHead(s.sig), impl_name)) return s;
     }
     return null;
 }

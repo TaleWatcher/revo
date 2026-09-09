@@ -1376,7 +1376,7 @@ pub fn unwrapArg(comptime spec: TypeSpec, data: Data) specToType(spec) {
         .function => @enumFromInt(data.asFunction().?),
         .table => @enumFromInt(data.asTable().?),
         .tuple => @enumFromInt(data.asTuple().?),
-        .bool => isBoolAtom(data.asAtom().?),
+        .bool => data.asAtom().? == revo.core_atoms.atomId(.true),
         .any => data,
     };
 }
@@ -1474,6 +1474,9 @@ fn countFn(comptime S: type) comptime_int {
 /// generic struct -> impls array
 /// iterates pub fn decls in the struct,
 /// derives TypeSpecs from each fn's parameter types, wraps with def()
+///
+/// the registered name is the full decl name, so `@"fs.stat"` pairs
+/// with the `fs.stat` spec by head instead of by position
 pub fn impls(comptime ImplType: type) type {
     const decls = @typeInfo(ImplType).@"struct".decls;
     const count = countFn(ImplType);
