@@ -786,10 +786,24 @@ fn reportToDiags(arena: std.mem.Allocator, report: lang.diagnostic.Report, enc: 
     if (report.parts.len == 0) return arena.alloc(T.Diagnostic, 0);
     var out = try std.ArrayList(T.Diagnostic).initCapacity(arena, report.parts.len);
 
-    // only span parts carry position info
+    // only span parts carry position info; each span shows its nearest
+    // preceding error text, falling back through report and span labels
+    var last_error: []const u8 = "";
     for (report.parts) |part| {
+        if (part == .@"error") {
+            last_error = part.@"error";
+            continue;
+        }
         if (part != .span) continue;
         const sp = part.span;
+        const message = if (last_error.len > 0)
+            last_error
+        else if (report.message.len > 0)
+            report.message
+        else if (sp.message.len > 0)
+            sp.message
+        else
+            "error";
         out.appendAssumeCapacity(.{
             .range = .{
                 .start = offsetToLspPos(source, sp.span.start, enc),
@@ -801,7 +815,7 @@ fn reportToDiags(arena: std.mem.Allocator, report: lang.diagnostic.Report, enc: 
                 .context => T.Diagnostic.Severity.Information,
                 .trace => T.Diagnostic.Severity.Hint,
             },
-            .message = if (report.message.len > 0) report.message else if (sp.message.len > 0) sp.message else "error",
+            .message = message,
             .source = "revo",
             .tags = &.{},
             .relatedInformation = &.{},

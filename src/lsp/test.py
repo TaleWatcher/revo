@@ -680,6 +680,30 @@ async def test_undefined_name_no_duplicates(client: LanguageClient):
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_multiple_errors_keep_own_messages(client: LanguageClient):
+    """distinct errors show their own text, not the first error's"""
+    uri = "file:///test/multi_err.rv"
+    client.text_document_did_open(
+        params=DidOpenTextDocumentParams(
+            text_document=TextDocumentItem(
+                uri=uri, language_id="revo", version=1,
+                text='let t = { name = "me" }\nt.a\nlet x: num = "hi"\n',
+            )
+        )
+    )
+    await client.wait_for_notification("textDocument/publishDiagnostics")
+    diags = client.diagnostics.get(uri, [])
+    for d in diags:
+        print(f"  diag: msg={d.message!r} range={d.range}")
+    assert len(diags) == 2, f"expected 2 diagnostics, got {
+        len(diags)}: {[d.message for d in diags]}"
+    assert any("not defined" in d.message for d in diags), (
+        f"missing unknown-field text in {[d.message for d in diags]}")
+    assert any("wants number" in d.message for d in diags), (
+        f"missing mismatch text in {[d.message for d in diags]}")
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_close(client: LanguageClient):
     """closing a file doesnt crahs"""
     client.text_document_did_close(
