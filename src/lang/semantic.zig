@@ -847,7 +847,7 @@ const SemanticChecker = struct {
         // vm globals (repl); without them, fall back to the spec registry so
         // bare calls like `print(x)` don't read as unknown
         if (self.lookup(name) == null and !ast.isDiscardName(name) and
-            !self.predeclared.contains(name) and revo.std_lib.api.find(name) == null)
+            !(self.fn_nesting > 0 and self.predeclared.contains(name)) and revo.std_lib.api.find(name) == null)
         {
             const msg = try std.fmt.allocPrint(self.alloc, "name `{s}` is not defined", .{name});
             try self.appendError(msg, span, "unknown name");
