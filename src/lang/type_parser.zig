@@ -117,6 +117,7 @@ const Parser = struct {
     /// * :atom (hash):      ":nil", ":ok", ":err"
     /// * fn(T) -> U:        "fn(int) -> bool"
     /// * (T):               "(int | string)" (paren grouping), "(int, string)" (tuple)
+    /// * {f: T, ...}:       "{ name: string, age: num }" (structural table)
     /// * !T / ?T:           "!int", "?int" (error union - prefix bang or kw_not)
     fn parseAtom(self: *Parser) !*ast.TypeExpr {
         const tok = self.peek();
@@ -182,6 +183,26 @@ const Parser = struct {
                 const start = self.advance();
                 const inner = try self.parseExpr();
                 return try ast.allocTypeExpr(self.alloc, self.span(start), .{ .error_union = inner });
+            },
+            .lsquiggly => {
+                const start = self.advance();
+                var fields = try std.ArrayList(ast.RecordField).initCapacity(self.alloc, 4);
+                errdefer fields.deinit(self.alloc);
+
+                while (!self.check(.rsquiggly) and !self.check(.eof)) {
+                    // field names may be contextual kws (`type`, `end`)
+                    const name = self.peek();
+                    if (name.type != .ident and !std.mem.startsWith(u8, @tagName(name.type), "kw_"))
+                        return error.UnexpectedToken;
+                    self.pos.* += 1;
+                    _ = try self.expect(.colon);
+                    try fields.append(self.alloc, .{ .name = name.text, .type_expr = try self.parseExpr() });
+                    if (!self.match(.comma)) break;
+                }
+                _ = try self.expect(.rsquiggly);
+                return try ast.allocTypeExpr(self.alloc, self.span(start), .{
+                    .record = try fields.toOwnedSlice(self.alloc),
+                });
             },
             else => return error.UnexpectedToken,
         }
@@ -292,6 +313,19 @@ pub fn evalTypeExpr(ctx: anytype, te: *const ast.TypeExpr) !TypeInfo {
                 }
             }
             return .{ .tag = .any };
+        },
+        // "{ name: string, age: num }" -> table with per-field types;
+        // names borrow source text like .named does, owners clone
+        .record => |fields| {
+            const owned = try ctx.alloc.alloc(types.RecordField, fields.len);
+            for (fields, owned) |f, *dst| dst.* = .{
+                .name = f.name,
+                .field_type = try evalTypeExpr(ctx, f.type_expr),
+            };
+
+            const value = try ctx.alloc.create(TypeInfo);
+            value.* = .{ .tag = .any };
+            return .{ .tag = .{ .table = .{ .key = null, .value = value, .fields = owned } } };
         },
         // "!int" -> union(@[{name="", types=@[:ok, int]}, {name="", types=@[:err, any]}])
         // the same shape the literal `(:ok, int) | (:err, any)` produces

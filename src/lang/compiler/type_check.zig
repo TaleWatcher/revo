@@ -154,6 +154,15 @@ pub fn inferFieldType(self: *Compiler, object: *const Node, name: []const u8) Ty
             }
             break :blk .{ .tag = .any };
         },
+        // `t.name` where t: { name: string } infers string
+        .table => |tbl| blk: {
+            if (tbl.fields) |fields| {
+                for (fields) |f| {
+                    if (std.mem.eql(u8, f.name, name)) break :blk f.field_type;
+                }
+            }
+            break :blk .{ .tag = .any };
+        },
         else => .{ .tag = .any },
     };
 }

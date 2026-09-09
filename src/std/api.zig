@@ -655,6 +655,16 @@ fn renderType(alloc: std.mem.Allocator, out: *std.ArrayList(u8), te: *const ast.
             try out.append(alloc, '!');
             try renderType(alloc, out, inner);
         },
+        .record => |fields| {
+            try out.append(alloc, '{');
+            for (fields, 0..) |f, i| {
+                if (i > 0) try out.appendSlice(alloc, ", ");
+                try out.appendSlice(alloc, f.name);
+                try out.appendSlice(alloc, ": ");
+                try renderType(alloc, out, f.type_expr);
+            }
+            try out.append(alloc, '}');
+        },
     }
 }
 

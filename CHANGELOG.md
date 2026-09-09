@@ -9,8 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- structural table types: annotate tables by shape with `{ name: string, age: num }`
+  - works in `let`/`const` bindings, fn params, return types, and type aliases
+  - open subtyping: extra fields are ok, missing or mistyped fields are compile errors
+  - field access on a structurally typed table infers the field's type
+
+  ```ruby
+  fn greet(u: { name: string }) u.name
+  greet({ name = "bob", age = 40 }) # "bob"
+  ```
+
 - std:
-  - overhauled `fs` module
+  - `fs`:
     - `fs.open(path, mode?)`: mode is `"r"` (default, opens existing), `"w"`
       (creates or truncates), `"a"` (creates or keeps)
     - `fs.remove(path, recursive?)`: `:true` deletes the whole tree
@@ -19,10 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `file.stat` / `fs.stat` take `follow?` (`:false` leaves symlinks alone, replacing `lstat`)
     - `fs.exists?` returns plain `bool` instead of `!bool`
     - `fs.touch(path)`, `fs.copy(src, dst)`
-    - paths starting with `~/` expand to the home directory across all `fs` functions
-    - **Breaking:** error unions always come back as tuples, with zig error names (`:FileNotFound`, `:DirNotEmpty`, …);
-      programmer errors (bad mode, bad permissions, `~user` paths, non-handles) raise instead (this is something every host function should do btw)
-    - **Breaking:** `mkdir`/`write` permissions are `num?` now, `write` data is `string`
 
 ### Changed
 

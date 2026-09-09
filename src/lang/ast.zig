@@ -101,6 +101,11 @@ pub const MatchResult = struct {
     groups: []GroupCapture,
 };
 
+pub const RecordField = struct {
+    name: []const u8,
+    type_expr: *TypeExpr,
+};
+
 pub const TypeExpr = struct {
     kind: Kind,
     span: Span,
@@ -110,6 +115,7 @@ pub const TypeExpr = struct {
         atom: []const u8,
         tuple: []const *TypeExpr,
         union_of: []const *TypeExpr,
+        record: []const RecordField,
         function: struct {
             params: []const FnParam,
             return_type: ?*TypeExpr,
@@ -139,6 +145,16 @@ pub const TypeExpr = struct {
                     if (i > 0) try writer.writeAll(" | ");
                     try v.printAt(writer, null);
                 }
+            },
+            .record => |fields| {
+                try writer.writeByte('{');
+                for (fields, 0..) |f, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.writeAll(f.name);
+                    try writer.writeAll(": ");
+                    try f.type_expr.printAt(writer, null);
+                }
+                try writer.writeByte('}');
             },
             .function => |f| {
                 try writer.writeAll("fn(");
@@ -972,6 +988,7 @@ pub fn walkTypeExpr(te: *const TypeExpr) void {
     switch (te.kind) {
         .tuple => |items| for (items) |item| walkTypeExpr(item),
         .union_of => |variants| for (variants) |v| walkTypeExpr(v),
+        .record => |fields| for (fields) |f| walkTypeExpr(f.type_expr),
         .function => |f| {
             for (f.params) |p| {
                 if (p.type_name) |t| walkTypeExpr(t);
@@ -991,6 +1008,7 @@ fn walkTypeExprWithVisitor(comptime Visitor: type, visitor: *Visitor, te: *const
         .atom => {},
         .tuple => |items| for (items) |item| walkTypeExprWithVisitor(Visitor, visitor, item),
         .union_of => |variants| for (variants) |v| walkTypeExprWithVisitor(Visitor, visitor, v),
+        .record => |fields| for (fields) |f| walkTypeExprWithVisitor(Visitor, visitor, f.type_expr),
         .function => |f| {
             for (f.params) |p| {
                 if (p.type_name) |t| walkTypeExprWithVisitor(Visitor, visitor, t);

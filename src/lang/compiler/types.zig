@@ -7,6 +7,12 @@ pub const UnionVariant = struct {
     types: []const TypeInfo,
 };
 
+/// one named field of a structural table type: `{ name: string }`
+pub const RecordField = struct {
+    name: []const u8,
+    field_type: TypeInfo,
+};
+
 pub const TypeInfo = struct {
     tag: Tag,
     doc: ?[]const u8 = null,
@@ -21,6 +27,8 @@ pub const TypeInfo = struct {
         table: struct {
             key: ?*const TypeInfo,
             value: *const TypeInfo,
+            // per-field types for `{ name: string }`; null = untyped map
+            fields: ?[]const RecordField = null,
         },
         struct_type: []const u8,
         function: *const FunctionSignature,
@@ -53,8 +61,24 @@ pub const TypeInfo = struct {
             .table => |ti| if (other.tag == .table) blk: {
                 const o = other.tag.table;
                 if (!eql(ti.value.*, o.value.*)) break :blk false;
-                if (ti.key) |tk| break :blk if (o.key) |ok| eql(tk.*, ok.*) else false;
-                break :blk o.key == null;
+
+                if (ti.key) |tk| {
+                    if (o.key) |ok| {
+                        if (!eql(tk.*, ok.*)) break :blk false;
+                    } else break :blk false;
+                } else if (o.key != null) break :blk false;
+
+                // fields compare syntactically, order-sensitive like tuples
+                if (ti.fields) |fs| {
+                    const os = o.fields orelse break :blk false;
+                    if (fs.len != os.len) break :blk false;
+                    for (fs, os) |f, of| {
+                        if (!std.mem.eql(u8, f.name, of.name)) break :blk false;
+                        if (!eql(f.field_type, of.field_type)) break :blk false;
+                    }
+                } else if (o.fields != null) break :blk false;
+
+                break :blk true;
             } else false,
             .function => |f| if (other.tag == .function) blk: {
                 const o = other.tag.function;
@@ -76,6 +100,22 @@ pub const TypeInfo = struct {
             .never => try alloc.dupe(u8, "never"),
             .type_var => |n| try alloc.dupe(u8, n),
             .table => |tbl| blk: {
+                // `{ name: string, age: num }` when field types are known
+                if (tbl.fields) |fields| {
+                    var buf = try std.ArrayList(u8).initCapacity(alloc, 64);
+                    errdefer buf.deinit(alloc);
+                    try buf.append(alloc, '{');
+                    for (fields, 0..) |f, i| {
+                        if (i > 0) try buf.appendSlice(alloc, ", ");
+                        try buf.appendSlice(alloc, f.name);
+                        try buf.appendSlice(alloc, ": ");
+                        const ff = try f.field_type.formatType(alloc);
+                        defer alloc.free(ff);
+                        try buf.appendSlice(alloc, ff);
+                    }
+                    try buf.append(alloc, '}');
+                    break :blk try buf.toOwnedSlice(alloc);
+                }
                 var buf = try std.ArrayList(u8).initCapacity(alloc, 64);
                 errdefer buf.deinit(alloc);
                 try buf.appendSlice(alloc, "table<");
@@ -230,7 +270,15 @@ pub fn clone(ti: TypeInfo, alloc: std.mem.Allocator) !TypeInfo {
             if (key) |k| k.* = try clone(tbl.key.?.*, alloc);
             const value = try alloc.create(TypeInfo);
             value.* = try clone(tbl.value.*, alloc);
-            return .{ .tag = .{ .table = .{ .key = key, .value = value } } };
+            const fields: ?[]RecordField = if (tbl.fields) |fs| blk: {
+                const owned = try alloc.alloc(RecordField, fs.len);
+                for (fs, owned) |f, *dst| dst.* = .{
+                    .name = try alloc.dupe(u8, f.name),
+                    .field_type = try clone(f.field_type, alloc),
+                };
+                break :blk owned;
+            } else null;
+            return .{ .tag = .{ .table = .{ .key = key, .value = value, .fields = fields } } };
         },
         .function => |sig| {
             const owned = try alloc.create(FunctionSignature);
@@ -278,6 +326,13 @@ pub fn deinitType(ti: *TypeInfo, alloc: std.mem.Allocator) void {
             }
             deinitType(@constCast(tbl.value), alloc);
             alloc.destroy(@constCast(tbl.value));
+            if (tbl.fields) |fields| {
+                for (fields) |*f| {
+                    alloc.free(f.name);
+                    deinitType(@constCast(&f.field_type), alloc);
+                }
+                alloc.free(fields);
+            }
         },
         .function => |sig| {
             for (sig.params) |*p| deinitType(@constCast(p), alloc);
@@ -300,6 +355,20 @@ pub fn canCoerce(from: TypeInfo, to: TypeInfo) bool {
     if (from.tag == .table and to.tag == .table) {
         const from_table = from.tag.table;
         const to_table = to.tag.table;
+        // target names fields: every one must exist in source with a
+        // fitting type; extra source fields are fine, tables are open
+        if (to_table.fields) |wants| {
+            if (from_table.fields) |haves| {
+                for (wants) |w| {
+                    const have = for (haves) |h| {
+                        if (std.mem.eql(u8, h.name, w.name)) break h.field_type;
+                    } else return false;
+                    if (!canCoerce(have, w.field_type)) return false;
+                }
+                return true;
+            }
+            // source field types unknown: fall back to the value check
+        }
         if (!canCoerce(from_table.value.*, to_table.value.*)) return false;
         if (to_table.key == null) return true;
         if (from_table.key == null) return true;
@@ -591,6 +660,7 @@ fn inferTableType(ctx: anytype, entries: []const ast.TableEntry) TypeInfo {
     var key_type: TypeInfo = .{ .tag = .any };
     var saw_explicit_key = false;
     var saw_implicit_key = false;
+    var fields = std.ArrayList(RecordField).initCapacity(ctx.alloc, entries.len) catch return .{ .tag = .any };
 
     for (entries) |entry| {
         // method definitions carry no value type
@@ -600,11 +670,27 @@ fn inferTableType(ctx: anytype, entries: []const ast.TableEntry) TypeInfo {
         {
             continue;
         }
-        value_type = mergeInferredType(value_type, inferExprType(ctx, entry.value));
+        const field_type = inferExprType(ctx, entry.value);
+        value_type = mergeInferredType(value_type, field_type);
         if (entry.key) |key| {
             const inferred_key = inferTableKeyType(ctx, key, entry.computed);
             key_type = if (saw_explicit_key) mergeInferredType(key_type, inferred_key) else inferred_key;
             saw_explicit_key = true;
+            // static `name = v` keys become record fields; dupes replace,
+            // last wins like the runtime
+            if (!entry.computed) {
+                switch (key.expr) {
+                    .ident, .hash => |name| {
+                        const slot = for (fields.items, 0..) |f, i| {
+                            if (std.mem.eql(u8, f.name, name)) break i;
+                        } else null;
+                        if (slot) |i| {
+                            fields.items[i].field_type = field_type;
+                        } else fields.append(ctx.alloc, .{ .name = name, .field_type = field_type }) catch return .{ .tag = .any };
+                    },
+                    else => {},
+                }
+            }
         } else {
             saw_implicit_key = true;
         }
@@ -613,14 +699,19 @@ fn inferTableType(ctx: anytype, entries: []const ast.TableEntry) TypeInfo {
     const value_ptr = ctx.alloc.create(TypeInfo) catch return .{ .tag = .any };
     value_ptr.* = value_type;
 
+    // a literal's shape is fully known, even when empty: `{}` carries
+    // zero fields so record targets reject it; genuinely unknown shapes
+    // (plain `table`, `any`) keep fields null and stay optimistic
+    const known_fields: ?[]RecordField = fields.toOwnedSlice(ctx.alloc) catch return .{ .tag = .any };
+
     if (!saw_explicit_key) {
-        return .{ .tag = .{ .table = .{ .key = null, .value = value_ptr } } };
+        return .{ .tag = .{ .table = .{ .key = null, .value = value_ptr, .fields = known_fields } } };
     }
 
     if (saw_implicit_key) key_type = mergeInferredType(key_type, .{ .tag = .number });
     const key_ptr = ctx.alloc.create(TypeInfo) catch return .{ .tag = .any };
     key_ptr.* = key_type;
-    return .{ .tag = .{ .table = .{ .key = key_ptr, .value = value_ptr } } };
+    return .{ .tag = .{ .table = .{ .key = key_ptr, .value = value_ptr, .fields = known_fields } } };
 }
 
 fn inferTableKeyType(ctx: anytype, key: *const ast.Node, computed: bool) TypeInfo {
@@ -702,6 +793,19 @@ fn bindTypeParam(subst: anytype, param: TypeInfo, arg: TypeInfo) anyerror!void {
             if (arg.tag != .table) return;
             try bindTypeParam(subst, tbl.value.*, arg.tag.table.value.*);
             if (tbl.key) |k| if (arg.tag.table.key) |ak| try bindTypeParam(subst, k.*, ak.*);
+            // `{ name: T }` against `{ name: string }` binds T -> string
+            if (tbl.fields) |pfs| {
+                if (arg.tag.table.fields) |afs| {
+                    for (pfs) |pf| {
+                        for (afs) |af| {
+                            if (std.mem.eql(u8, pf.name, af.name)) {
+                                try bindTypeParam(subst, pf.field_type, af.field_type);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         },
         .function => |fsig| {
             if (arg.tag != .function) return;
@@ -749,6 +853,24 @@ pub fn substituteTypeParams(alloc: std.mem.Allocator, ti: TypeInfo, subst: anyty
                 .type_params = fsig.type_params,
             };
             break :blk .{ .tag = .{ .function = new_sig } };
+        },
+        .table => |tbl| blk: {
+            const new_value = try alloc.create(TypeInfo);
+            new_value.* = try substituteTypeParams(alloc, tbl.value.*, subst);
+            const new_key: ?*TypeInfo = if (tbl.key) |k| blk2: {
+                const nk = try alloc.create(TypeInfo);
+                nk.* = try substituteTypeParams(alloc, k.*, subst);
+                break :blk2 nk;
+            } else null;
+            const new_fields: ?[]RecordField = if (tbl.fields) |fs| blk2: {
+                const owned = try alloc.alloc(RecordField, fs.len);
+                for (fs, owned) |f, *dst| dst.* = .{
+                    .name = f.name,
+                    .field_type = try substituteTypeParams(alloc, f.field_type, subst),
+                };
+                break :blk2 owned;
+            } else null;
+            break :blk .{ .tag = .{ .table = .{ .key = new_key, .value = new_value, .fields = new_fields } } };
         },
         else => ti,
     };
@@ -881,6 +1003,100 @@ test "typed binding table<string, num> accepts keyed table literal" {
         \\ let pairs: table<string, num> = { a = 1, b = 2 }
         \\ 1
     , 1);
+}
+
+test "record annotation accepts matching literal" {
+    try t.topNumber(
+        \\ let u: { name: string, age: num } = { name = "alice", age = 30 }
+        \\ u.age
+    , 30);
+}
+
+test "record rejects missing field" {
+    try t.expectCompileError(
+        \\ let u: { name: string, age: num } = { name = "alice" }
+    , .ParseError);
+}
+
+test "record rejects wrong field type" {
+    try t.expectCompileError(
+        \\ let u: { name: string } = { name = 42 }
+    , .ParseError);
+}
+
+test "record allows extra fields" {
+    try t.topString(
+        \\ let u: { name: string } = { name = "alice", age = 30 }
+        \\ u.name
+    , "alice");
+}
+
+test "record field access infers precise type" {
+    try t.topNumber(
+        \\ let u: { name: string, age: num } = { name = "alice", age = 30 }
+        \\ u.age + 12
+    , 42);
+}
+
+test "record field flows into typed binding" {
+    try t.expectCompileError(
+        \\ let u: { name: string } = { name = "alice" }
+        \\ let x: num = u.name
+    , .ParseError);
+}
+
+test "record fn param accepts table with extra fields" {
+    try t.topString(
+        \\ fn greet(u: { name: string }) u.name
+        \\ greet({ name = "bob", age = 40 })
+    , "bob");
+}
+
+test "record fn param rejects missing field" {
+    try t.expectCompileError(
+        \\ fn greet(u: { name: string, age: num }) u.name
+        \\ greet({ name = "bob" })
+    , .ParseError);
+}
+
+test "record alias works in bindings" {
+    try t.topNumber(
+        \\ type User = { name: string, age: num }
+        \\ let u: User = { name = "alice", age = 30 }
+        \\ u.age
+    , 30);
+}
+
+test "nested records check inner fields" {
+    try t.topString(
+        \\ let t: { user: { name: string } } = { user = { name = "alice" } }
+        \\ t.user.name
+    , "alice");
+}
+
+test "nested record rejects bad inner field" {
+    try t.expectCompileError(
+        \\ let t: { user: { name: string } } = { user = { name = 42 } }
+    , .ParseError);
+}
+
+test "empty record accepts any table" {
+    try t.topNumber(
+        \\ let u: {} = { a = 1 }
+        \\ 1
+    , 1);
+}
+
+test "record rejects empty literal" {
+    try t.expectCompileError(
+        \\ let a: { name: num } = {}
+    , .ParseError);
+}
+
+test "record rejects array literal" {
+    try t.expectCompileError(
+        \\ let a: { name: num } = { 1, 2, 3 }
+    , .ParseError);
 }
 
 test "typed function params accept correct types" {
