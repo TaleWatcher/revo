@@ -58,6 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `const x = import "raylib.so"` named imports now get the fields from the module's
   `.d.rv` manifest just like the normal `import "raylib.so"`
 
+- lsp signatures show generics and optional params:
+  `fn id[T](v: T) -> T`, `f(a: num, b?: num)` in hover and signature help
+
 ## [0.1.2] - 2026-09-05
 
 big release - many misc bugs are fixed but not noted

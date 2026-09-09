@@ -42,6 +42,8 @@ const CacheEntry = struct {
 pub const FnSig = struct {
     params: []ParamInfo,
     return_type: ?types.TypeInfo = null,
+    /// pre-rendered `[T, U]` or null
+    type_params_text: ?[]const u8 = null,
 };
 
 // cache for inspectDetailed (quick inspect)
@@ -140,12 +142,16 @@ pub const Hover = struct {
 pub const ParamInfo = struct {
     name: []const u8,
     type_name: ?types.TypeInfo = null,
+    optional: bool = false,
 };
 
 pub const SignatureHelp = struct {
     name: []const u8,
     params: []ParamInfo,
     return_type: ?types.TypeInfo = null,
+    /// pre-rendered `[T, U]` or null; kept as text since no consumer
+    /// needs the params structurally
+    type_params_text: ?[]const u8 = null,
     doc: ?[]const u8,
     active_param: u32,
 
@@ -157,6 +163,7 @@ pub const SignatureHelp = struct {
         }
         alloc.free(self.params);
         if (self.return_type) |*ti| types.deinitType(ti, alloc);
+        if (self.type_params_text) |t| alloc.free(t);
         if (self.doc) |d| alloc.free(d);
     }
 };
@@ -868,18 +875,28 @@ pub fn renderDefinition(
     if (try ws.fnSig(alloc, file_id, name)) |sig| {
         var buf = std.Io.Writer.Allocating.init(alloc);
         defer buf.deinit();
-        try buf.writer.print("fn {s}(", .{name});
+
+        try buf.writer.print("fn {s}", .{name});
+        if (sig.type_params_text) |tps| try buf.writer.writeAll(tps);
+        try buf.writer.writeByte('(');
+
         for (sig.params, 0..) |p, i| {
             if (i > 0) try buf.writer.print(", ", .{});
-            const pt = if (p.type_name) |ti| try ti.formatType(alloc) else "";
-            try buf.writer.print("{s}: {s}", .{ p.name, pt });
-            if (p.type_name != null) alloc.free(pt);
+            try buf.writer.writeAll(p.name);
+            if (p.optional) try buf.writer.writeByte('?');
+            if (p.type_name) |ti| {
+                const pt = try ti.formatType(alloc);
+                defer alloc.free(pt);
+                try buf.writer.print(": {s}", .{pt});
+            }
         }
+
         try buf.writer.writeByte(')');
         if (sig.return_type) |rt| {
             const rt_str = try rt.formatType(alloc);
             try buf.writer.print(" -> {s}", .{rt_str});
         }
+
         return buf.toOwnedSlice();
     }
     if (type_name.len > 0 and std.mem.startsWith(u8, type_name, "fn(")) {
@@ -949,13 +966,19 @@ pub fn signatureHelp(
     errdefer alloc.free(name_copy);
     const params_copy = try alloc.alloc(ParamInfo, sig.params.len);
     errdefer alloc.free(params_copy);
+
     for (sig.params, 0..) |p, i| {
         params_copy[i] = .{
             .name = try alloc.dupe(u8, p.name),
             .type_name = if (p.type_name) |ti| try types.clone(ti, alloc) else null,
+            .optional = p.optional,
         };
     }
+
     const ret_copy = if (sig.return_type) |rt| try types.clone(rt, alloc) else null;
+    const tps_copy = if (sig.type_params_text) |t| try alloc.dupe(u8, t) else null;
+
+    errdefer if (tps_copy) |t| alloc.free(t);
     // docs come from the semantic layer, not the sig
     const doc_copy: ?[]const u8 = if (self.inspect_cache.getPtr(def.file_id)) |dc|
         if (dc.docs.get(call_info.name)) |d| try alloc.dupe(u8, d) else null
@@ -967,6 +990,7 @@ pub fn signatureHelp(
         .name = name_copy,
         .params = params_copy,
         .return_type = ret_copy,
+        .type_params_text = tps_copy,
         .doc = doc_copy,
         .active_param = call_info.active_param,
     };
@@ -1911,6 +1935,7 @@ const SigVisitor = struct {
             dst.* = .{
                 .name = self.alloc.dupe(u8, src.name) catch return null,
                 .type_name = if (src.type_name) |te| self.ownedType(te) else null,
+                .optional = src.optional or src.default_value != null,
             };
         }
         return params;
@@ -1929,6 +1954,7 @@ const SigVisitor = struct {
                             dst.* = .{
                                 .name = self.alloc.dupe(u8, src.name) catch return,
                                 .type_name = if (src.type_name) |te| self.ownedType(te) else null,
+                                .optional = src.optional or src.default_value != null,
                             };
                         }
 
@@ -1955,6 +1981,7 @@ const SigVisitor = struct {
                 self.sig_map.put(self.alloc, name_owned, .{
                     .params = params,
                     .return_type = null,
+                    .type_params_text = formatTypeParams(self.alloc, fn_expr.type_params) catch return,
                 }) catch return;
             },
             .assign_expr => |ae| {
@@ -1975,6 +2002,7 @@ const SigVisitor = struct {
                 self.sig_map.put(self.alloc, name_owned, .{
                     .params = params,
                     .return_type = return_type,
+                    .type_params_text = formatTypeParams(self.alloc, fn_expr.type_params) catch return,
                 }) catch return;
             },
             else => lang.ast.walkAST(@This(), self, node),
@@ -2277,9 +2305,28 @@ fn freeSigMap(alloc: std.mem.Allocator, map: *const std.StringHashMapUnmanaged(F
         }
         alloc.free(entry.value_ptr.params);
         if (entry.value_ptr.return_type) |*rt| types.deinitType(rt, alloc);
+        if (entry.value_ptr.type_params_text) |t| alloc.free(t);
     }
     const mut = @constCast(map);
     mut.deinit(alloc);
+}
+
+/// `[T, U]` or null when empty
+/// caller owns the result
+fn formatTypeParams(alloc: std.mem.Allocator, type_params: []const []const u8) !?[]const u8 {
+    if (type_params.len == 0) return null;
+    var buf = std.Io.Writer.Allocating.init(alloc);
+    errdefer buf.deinit();
+    try buf.writer.writeByte('[');
+
+    for (type_params, 0..) |tp, i| {
+        if (i > 0) try buf.writer.writeAll(", ");
+        try buf.writer.writeAll(tp);
+    }
+
+    try buf.writer.writeByte(']');
+    const owned: []const u8 = try buf.toOwnedSlice();
+    return owned;
 }
 
 fn positionBefore(a: Position, b: Position) bool {

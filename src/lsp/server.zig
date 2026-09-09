@@ -272,13 +272,15 @@ const Handler = struct {
         const sig = try h.ws.signatureHelp(arena, file_id, ws_pos, .{}) orelse return null;
         // sig is arena-allocated; arena cleans up after handler returns
 
-        // build the label like `fn_name(param1: t1, param2: t2): ret`
+        // build the label like `fn_name[T](param1: t1, param2?: t2): ret`
         var label = try std.ArrayList(u8).initCapacity(arena, 64);
         try label.appendSlice(arena, sig.name);
+        if (sig.type_params_text) |tps| try label.appendSlice(arena, tps);
         try label.append(arena, '(');
         for (sig.params, 0..) |p, i| {
             if (i > 0) try label.appendSlice(arena, ", ");
             try label.appendSlice(arena, p.name);
+            if (p.optional) try label.append(arena, '?');
             if (p.type_name) |ti| {
                 const pt = try ti.formatType(arena);
                 try label.appendSlice(arena, ": ");
@@ -296,10 +298,12 @@ const Handler = struct {
         // param offsets into label
         var params_list = try std.ArrayList(T.SignatureHelp.Signature.Parameter).initCapacity(arena, sig.params.len);
         var pos: u32 = @as(u32, @intCast(sig.name.len)) + 1; // after `(`
+        if (sig.type_params_text) |tps| pos += @as(u32, @intCast(tps.len));
         for (sig.params) |p| {
             const start = pos;
-            // skip past `name: type` or just `name`
+            // skip past `name`, `?`, and `: type`
             pos += @as(u32, @intCast(p.name.len));
+            if (p.optional) pos += 1;
             if (p.type_name) |ti| {
                 const pt = try ti.formatType(arena);
                 pos += 2 + @as(u32, @intCast(pt.len));
