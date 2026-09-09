@@ -13,6 +13,11 @@ calculates the arithmetic mean of an array of numbers
 pub declare stats.mean = fn(input: table<num>) -> num
 
 #*
+calculates the geometric mean of an array of numbers
+*#
+pub declare stats.geomean = fn(input: table<num>) -> num
+
+#*
 middle value of input data
 *#
 pub declare stats.median = fn(input: table<num>) -> num
@@ -62,8 +67,37 @@ sample kurtosis of the input data
 *#
 pub declare stats.sample_kurtosis = fn(input: table<num>) -> num
 
-
 #*
 table of all statistics of the input data
 *#
 pub declare stats.statistics = fn(input: table<num>) -> table
+
+#*
+slope of the regression of the input data
+*#
+pub declare stats.slope = fn(input1: table<num>, input2: table<num>) -> num
+
+#*
+intercept of the regression of the input data
+*#
+pub declare stats.intercept = fn(input1: table<num>, input2: table<num>) -> num
+
+#*
+correlation coefficient of the input data
+*#
+pub declare stats.correlation = fn(input1: table<num>, input2: table<num>) -> num
+
+#*
+population covariance of the input data
+*#
+pub declare stats.covariance = fn(input1: table<num>, input2: table<num>) -> num
+
+#*
+sample covariance of the input data
+*#
+pub declare stats.sample_covariance = fn(input1: table<num>, input2: table<num>) -> num
+
+#*
+table of regression statistics of the input data
+*#
+pub declare stats.regression = fn(input1: table<num>, input2: table<num>) -> table

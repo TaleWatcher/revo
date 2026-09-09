@@ -16,7 +16,14 @@ const Table = revo.table.Table;
 const testing = revo.lang.testing;
 const table_methods = table_std.Impl;
 
+
+//
+// RunningStats
+//
 // An accumulator for statistical data.
+// Originally formulated by Donald Knuth in "The Art of Computer Programming".
+//
+
 const RunningStats = struct {
     // amount of pushed data
     n: usize = 0,
@@ -44,6 +51,10 @@ const RunningStats = struct {
     }
     pub fn deinit(self: *RunningStats) void {
         self.freq.deinit();
+    }
+
+    pub fn n_float(self: *RunningStats) f64 {
+        return @as(f64, @floatFromInt(self.n));
     }
 
     fn pushEle(self: *RunningStats, x: f64) !void {
@@ -82,14 +93,14 @@ const RunningStats = struct {
             self.imode = x;
         }
 
-        const n_float = @as(f64, @floatFromInt(self.n));
+        const nf = self.n_float();
         const nm1_float = @as(f64, @floatFromInt(self.n - 1));
         const delta = x - self.mom1;
-        const delta_n = (delta / n_float) - self.mom1_comp;
+        const delta_n = (delta / nf) - self.mom1_comp;
         const delta_n2 = delta_n * delta_n;
         const term1 = delta * delta_n * nm1_float;
-        self.mom4 += term1 * delta_n2 * (n_float * n_float - 3 * n_float + 3) + 6 * delta_n2 * self.mom2 - 4 * delta_n * self.mom3;
-        self.mom3 += term1 * delta_n * (n_float - 2) - 3 * delta_n * self.mom2;
+        self.mom4 += term1 * delta_n2 * (nf * nf - 3 * nf + 3) + 6 * delta_n2 * self.mom2 - 4 * delta_n * self.mom3;
+        self.mom3 += term1 * delta_n * (nf - 2) - 3 * delta_n * self.mom2;
         self.mom2 += term1;
         // mean compensation for tail-end precision
         const next_mom1 = self.mom1 + delta_n;
@@ -117,6 +128,11 @@ const RunningStats = struct {
         return self.mom1;
     }
 
+    fn geomean(self: *RunningStats) f64 {
+        // Computes the current mean of `self`.
+        return math.pow(f64, self.prd, 1 / self.n_float());
+    }
+
     fn mode(self: *RunningStats) f64 {
         // Computes the current mode of `self`.
         return self.imode;
@@ -124,16 +140,14 @@ const RunningStats = struct {
 
     fn variance(self: *RunningStats) f64 {
         // Computes the current population variance of `self`.
-        const n_float = @as(f64, @floatFromInt(self.n));
-        return self.mom2 / n_float;
+        return self.mom2 / self.n_float();
     }
 
     fn varianceS(self: *RunningStats) f64 {
         // Computes the current sample variance of `self`.
         if (self.n <= 1) return 0.0;
 
-        const n_float = @as(f64, @floatFromInt(self.n));
-        const nm1_float = n_float - 1.0;
+        const nm1_float = self.n_float() - 1.0;
         return self.mom2 / nm1_float;
     }
 
@@ -149,34 +163,32 @@ const RunningStats = struct {
 
     fn skewness(self: *RunningStats) f64 {
         // Computes the current population skewness of `self`.
-        const n_float = @as(f64, @floatFromInt(self.n));
-        return math.sqrt(n_float) * self.mom3 / math.pow(f64, self.mom2, 1.5);
+        return math.sqrt(self.n_float()) * self.mom3 / math.pow(f64, self.mom2, 1.5);
     }
 
     fn skewnessS(self: *RunningStats) f64 {
         // Computes the current sample skewness of `self`.
         if (self.n <= 2) return 0.0;
 
-        const n_float = @as(f64, @floatFromInt(self.n));
-        const nm2_float = n_float - 2.0;
+        const nf = self.n_float();
+        const nm2_float = nf - 2.0;
         const s2 = self.skewness();
-        return math.sqrt(n_float * (n_float - 1)) * s2 / nm2_float;
+        return math.sqrt(nf * (nf - 1)) * s2 / nm2_float;
     }
 
     fn kurtosis(self: *RunningStats) f64 {
         // Computes the current population kurtosis of `self`.
-        const n_float = @as(f64, @floatFromInt(self.n));
-        return n_float * self.mom4 / (self.mom2 * self.mom2) - 3.0;
+        return self.n_float() * self.mom4 / (self.mom2 * self.mom2) - 3.0;
     }
 
     fn kurtosisS(self: *RunningStats) f64 {
         // Computes the current sample kurtosis of `self`.
         if (self.n <= 3) return 0.0;
 
-        const n_float = @as(f64, @floatFromInt(self.n));
-        const nm1_float = n_float - 1.0;
-        const np1_float = n_float + 1.0;
-        const nm2_x_nm3_float = (n_float - 2.0) * (n_float - 3.0);
+        const nf = self.n_float();
+        const nm1_float = nf - 1.0;
+        const np1_float = nf + 1.0;
+        const nm2_x_nm3_float = (nf - 2.0) * (nf - 3.0);
         return nm1_float / nm2_x_nm3_float * (np1_float * self.kurtosis() + 6);
     }
 };
@@ -204,12 +216,106 @@ test "RunningStats struct and methods" {
     try std.testing.expectApproxEqAbs(runningStats.kurtosisS(), -0.7000000000000008, tolerance);
 }
 
-// const RunningRegress = struct { // An accumulator for regression calculations.
-//     n: usize,                   // amount of pushed data
-//     x_stats: RunningStats,       // stats for the first set of data
-//     y_stats: RunningStats,       // stats for the second set of data
-//     s_xy: f64,                  // accumulated data for combined xy
-// };
+
+
+const RunningRegress = struct { // An accumulator for regression calculations.
+    n: usize = 0,               // amount of pushed data
+    x_stats: RunningStats,      // stats for the first set of data
+    y_stats: RunningStats,      // stats for the second set of data
+    s_xy: f64 = 0.0,            // accumulated data for combined xy
+
+    pub fn init(allocator: std.mem.Allocator) RunningRegress {
+        return .{
+            .x_stats = RunningStats.init(allocator),
+            .y_stats = RunningStats.init(allocator),
+        };
+    }
+    pub fn deinit(self: *RunningRegress) void {
+        self.x_stats.deinit();
+        self.y_stats.deinit();
+    }
+
+    pub fn n_float(self: *RunningRegress) f64 {
+        return @as(f64, @floatFromInt(self.n));
+    }
+
+    fn pushEles(self: *RunningRegress, x: f64, y: f64) !void {
+        // Pushes two values `x` and `y` for processing.
+        self.s_xy += (self.x_stats.mean() - x) * (self.y_stats.mean() - y) * self.n_float() / @as(f64, @floatFromInt(self.n + 1));
+        try self.x_stats.pushEle(x);
+        try self.y_stats.pushEle(y);
+        self.n += 1;
+    }
+
+    fn pushData(self: *RunningRegress, x_data: *std.ArrayList(f64), y_data: *std.ArrayList(f64)) !void {
+        // Pushes two sets of values `x` and `y` for processing.
+        for (0..x_data.items.len) |i| {
+            try self.pushEles(x_data.items[i], y_data.items[i]);
+        }
+    }
+
+    fn pushTableData(self: *RunningRegress, x_data: *std.ArrayList(Data), y_data: *std.ArrayList(Data)) !void {
+        for (x_data.items, 0..) |value, idx| {
+            const x_num = value.asNum() orelse return error.NonNumericValue;
+            const y_num = y_data.items[idx].asNum() orelse return error.NonNumericValue;
+            try self.pushEles(x_num, y_num);
+        }
+    }
+
+    fn slope(self: *RunningRegress) f64 {
+        // Computes the slope of `self`.
+        const s_xx = self.x_stats.varianceS() * @as(f64, @floatFromInt(self.n - 1));
+        return self.s_xy / s_xx;
+    }
+
+    fn intercept(self: *RunningRegress) f64 {
+        // Computes the intercept of `self`.
+        return self.y_stats.mean() - self.slope() * self.x_stats.mean();
+    }
+
+    fn correlation(self: *RunningRegress) f64 {
+        // Computes the correlation of the two data
+        // sets pushed into `self`.
+        const t = self.x_stats.standardDeviation() * self.y_stats.standardDeviation();
+        return self.s_xy / (self.n_float() * t);
+    }
+
+    fn covariance(self: *RunningRegress) f64 {
+        // Computes the population covariance of the two data
+        // sets pushed into `self`.
+        return self.s_xy / self.n_float();
+    }
+
+    fn sample_covariance(self: *RunningRegress) f64 {
+        // Computes the sample covariance of the two data
+        // sets pushed into `self`.
+        return self.s_xy / @as(f64, @floatFromInt(self.n - 1));
+    }
+};
+
+test "RunningRegress struct and methods" {
+    const a = std.testing.allocator;
+    const expect = std.testing.expect;
+
+    var list_a: std.ArrayList(f64) = .empty;
+    var list_b: std.ArrayList(f64) = .empty;
+    defer { list_a.deinit(a); list_b.deinit(a); }
+    try list_a.appendSlice(a, &.{ 1.0, 2.0, 3.0, 4.0, 5.0 });
+    try list_b.appendSlice(a, &.{ 2.0, 3.0, 5.0, 4.0, 6.0 });
+
+    var runningRegress: RunningRegress = RunningRegress.init(a);
+    defer runningRegress.deinit();
+    try runningRegress.pushData(&list_a, &list_b);
+    const tolerance = 0.00001;
+
+    try expect(runningRegress.n == 5);
+    try std.testing.expectApproxEqAbs(runningRegress.slope(), 0.9, tolerance);
+    try std.testing.expectApproxEqAbs(runningRegress.intercept(), 1.3, tolerance);
+    try std.testing.expectApproxEqAbs(runningRegress.correlation(), 0.9, tolerance);
+    try std.testing.expectApproxEqAbs(runningRegress.covariance(), 1.8, tolerance);
+    try std.testing.expectApproxEqAbs(runningRegress.sample_covariance(), 2.25, tolerance);
+}
+
 
 pub const Impl = struct {
     fn buildStats(vm: *VM, table_id: Ts.table) !RunningStats {
@@ -231,6 +337,7 @@ pub const Impl = struct {
         switch (e) {
             error.EmptyTable => return .errType(0, "table with at least 1 element", "no statistics for empty data"),
             error.NonNumericValue => return .errType(0, "table of numbers", "table contains a non-numeric value"),
+            error.NonMatchingTables => return .errType(0, "tables of matching length", "table lengths do not match"),
             else => return e,
         }
     }
@@ -283,6 +390,12 @@ pub const Impl = struct {
     // Arithmetic mean (“average”) of data.
     pub fn mean(vm: *VM, table_id: Ts.table) !HostResult {
         return numStat(vm, table_id, RunningStats.mean);
+    }
+
+    // stats.geomean(table) -> num
+    // Geometric mean of data.
+    pub fn geomean(vm: *VM, table_id: Ts.table) !HostResult {
+        return numStat(vm, table_id, RunningStats.geomean);
     }
 
     // stats.median(table) -> num
@@ -432,6 +545,7 @@ pub const Impl = struct {
             try freq_table.put(freq_table_id, vm, Data.new.num(@as(f64, @bitCast(entry.key_ptr.*))), Data.new.num(entry.value_ptr.*));
         }
 
+        try result_table.put(result_table_id, vm, try vm.dataAtom("n"), Data.new.num(runningStats.n));
         try result_table.put(result_table_id, vm, try vm.dataAtom("frequencies"), Data.new.table(freq_table_id));
         try result_table.put(result_table_id, vm, try vm.dataAtom("mean"), Data.new.num(runningStats.mean()));
         try result_table.put(result_table_id, vm, try vm.dataAtom("median"), (try median(vm, table_id)).ok);
@@ -444,6 +558,78 @@ pub const Impl = struct {
         try result_table.put(result_table_id, vm, try vm.dataAtom("sample_skewness"), Data.new.num(runningStats.skewnessS()));
         try result_table.put(result_table_id, vm, try vm.dataAtom("kurtosis"), Data.new.num(runningStats.kurtosis()));
         try result_table.put(result_table_id, vm, try vm.dataAtom("sample_kurtosis"), Data.new.num(runningStats.kurtosisS()));
+
+        return .data(Data.new.table(result_table_id));
+    }
+
+    fn buildRegress(vm: *VM, table_1_id: Ts.table, table_2_id: Ts.table) !RunningRegress {
+        const table_1 = try vm.tables.get(@intFromEnum(table_1_id));
+        const table_2 = try vm.tables.get(@intFromEnum(table_2_id));
+
+        if (table_1.array.items.len == 0 or table_2.array.items.len == 0) {
+            return error.EmptyTable;
+        } if (table_1.array.items.len != table_2.array.items.len) {
+            return error.NonMatchingTables;
+        }
+
+        var runningRegress: RunningRegress = RunningRegress.init(vm.runtime.alloc);
+        errdefer runningRegress.deinit();
+        try runningRegress.pushTableData(&table_1.array, &table_2.array);
+        return runningRegress;
+    }
+
+    fn numRegress(vm: *VM, table_1_id: Ts.table, table_2_id: Ts.table, comptime compute: fn (*RunningRegress) f64) !HostResult {
+        var runningRegress = buildRegress(vm, table_1_id, table_2_id) catch |e| return statsErrResult(e);
+        defer runningRegress.deinit();
+        return .data(Data.new.num(compute(&runningRegress)));
+    }
+
+    // stats.slope(table, table) -> num
+    // Slope of the regression of the data.
+    pub fn slope(vm: *VM, table_1_id: Ts.table, table_2_id: Ts.table) !HostResult {
+        return numRegress(vm, table_1_id, table_2_id, RunningRegress.slope);
+    }
+
+    // stats.intercept(table, table) -> num
+    // Intercept of the regression of the data.
+    pub fn intercept(vm: *VM, table_1_id: Ts.table, table_2_id: Ts.table) !HostResult {
+        return numRegress(vm, table_1_id, table_2_id, RunningRegress.intercept);
+    }
+
+    // stats.correlation(table, table) -> num
+    // Correlation coefficient of the data.
+    pub fn correlation(vm: *VM, table_1_id: Ts.table, table_2_id: Ts.table) !HostResult {
+        return numRegress(vm, table_1_id, table_2_id, RunningRegress.correlation);
+    }
+
+    // stats.covariance(table, table) -> num
+    // Population covariance of the data.
+    pub fn covariance(vm: *VM, table_1_id: Ts.table, table_2_id: Ts.table) !HostResult {
+        return numRegress(vm, table_1_id, table_2_id, RunningRegress.covariance);
+    }
+
+    // stats.sample_covariance(table, table) -> num
+    // Sample covariance of the data.
+    pub fn sample_covariance(vm: *VM, table_1_id: Ts.table, table_2_id: Ts.table) !HostResult {
+        return numRegress(vm, table_1_id, table_2_id, RunningRegress.sample_covariance);
+    }
+
+    // stats.regression(table) -> table
+    // table of all regression statistics of the input data
+    pub fn regression(vm: *VM, table_1_id: Ts.table, table_2_id: Ts.table) !HostResult {
+        var runningRegress = buildRegress(vm, table_1_id, table_2_id) catch |e| return statsErrResult(e);
+        defer runningRegress.deinit();
+
+        const result_table_id = try vm.tables.create();
+        const result_table = try vm.tables.get(result_table_id);
+
+        try result_table.put(result_table_id, vm, try vm.dataAtom("n"), Data.new.num(runningRegress.n));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("sum_of_products"), Data.new.num(runningRegress.s_xy));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("slope"), Data.new.num(runningRegress.slope()));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("intercept"), Data.new.num(runningRegress.intercept()));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("correlation"), Data.new.num(runningRegress.correlation()));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("covariance"), Data.new.num(runningRegress.covariance()));
+        try result_table.put(result_table_id, vm, try vm.dataAtom("sample_covariance"), Data.new.num(runningRegress.sample_covariance()));
 
         return .data(Data.new.table(result_table_id));
     }
@@ -468,6 +654,7 @@ test "stats methods" {
     try testing.topTrue("{1, 1, 1, 2, 3, 3} |> stats.frequencies() == {1=3, 2=1, 3=2}");
     try testing.topTrue("{\"hello\", \"world\", \"how say\", \"hello\",} |> stats.frequencies() == {\"hello\"=2, \"world\"=1, \"how say\"=1}");
     try testing.topTrue("{1, 1, 1, 2, 3} |> stats.mean() == 1.6");
+    try testing.topTrue("{54, 24, 36} |> stats.geomean() == 36");
     try testing.topTrue("{3, 1, 2, 1, 1} |> stats.median() == 1");
     try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.median() == 1.5");
     try testing.topTrue("{3, 1, 2, 1, 3, 1} |> stats.mode() == 1");
@@ -482,13 +669,12 @@ test "stats methods" {
     try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sample_skewness() |> math.is_close?(1.018350154434631, 15)");
     try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.kurtosis() |> math.is_close?(-1.0, 1)");
     try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sample_kurtosis() |> math.is_close?(-0.7000000000000008, 16)");
+    try testing.topTrue("stats.slope({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.is_close?(0.9, 1)");
+    try testing.topTrue("stats.intercept({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.is_close?(1.3, 1)");
+    try testing.topTrue("stats.correlation({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.is_close?(0.9, 1)");
+    try testing.topTrue("stats.covariance({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.is_close?(1.8, 1)");
+    try testing.topTrue("stats.sample_covariance({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.is_close?(2.25, 1)");
 }
-
-// fmean(data, weights=None)
-// Fast, floating-point arithmetic mean, with optional weighting.
-
-// geometric_mean(data)
-// Geometric mean of data.
 
 // harmonic_mean(data, weights=None)
 // Harmonic mean of data.
