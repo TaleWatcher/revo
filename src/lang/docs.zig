@@ -665,7 +665,7 @@ fn renderHtmlFn(
         try writeIndent(w, indent + 2);
         try w.writeAll("<p class=\"marker\">(value)</p>\n\n");
     } else {
-        try writeHtmlTextBlock(w, indent + 2, "<pre class=\"signature\"><code>", "</code></pre>", sig, 0);
+        try writeHtmlTextBlock(w, 0, "<pre class=\"signature\"><code>", "</code></pre>", sig, 0);
     }
 
     if (spec.core_key) |k| {
@@ -750,7 +750,7 @@ fn renderHtmlDoc(w: *Writer, doc: []const u8, indent: usize) !void {
 
     try writeHtmlTextBlock(w, indent, "<p class=\"desc\">", "</p>", prose, minIndentOf(prose));
     if (code.len > 0) {
-        try writeHtmlTextBlock(w, indent, "<pre class=\"example\"><code class=\"language-revo\">", "</code></pre>", code, minIndentOf(code));
+        try writeHtmlTextBlock(w, 0, "<pre class=\"example\"><code class=\"language-revo\">", "</code></pre>", code, minIndentOf(code));
     }
 }
 
