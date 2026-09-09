@@ -392,7 +392,6 @@ pub const impls: []const api.Impl = root.impls(Impl).val;
 // .{ .name = "median_grouped", .f = root.define(&.{.table}, median_grouped) },
 // .{ .name = "multimode", .f = root.define(&.{ .table }, multimode) },
 // .{ .name = "quantiles", .f = root.define(&.{.table}, quantiles) },
-// .{ .name = "stdev", .f = root.define(&.{ .table }, stdev) },
 // .{ .name = "covariance", .f = root.define(&.{ .table }, covariance) },
 // .{ .name = "correlation", .f = root.define(&.{.table}, correlation) },
 // .{ .name = "linear_regression", .f = root.define(&.{.table}, linear_regression) },
@@ -439,12 +438,6 @@ test "stats methods" {
 
 // quantiles(data, n=4, method='exclusive')
 // Divide data into intervals with equal probability.
-
-// stdev(data, xbar=None)
-// Sample standard deviation of data.
-
-// variance(data, xbar=None)
-// Sample variance of data.
 
 // covariance(x, y)
 // Sample covariance for two variables.
