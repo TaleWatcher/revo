@@ -29,6 +29,8 @@ pub const BareCtx = struct {
     pub fn resolveTypeAlias(_: @This(), _: []const u8) ?types.TypeInfo {
         return null;
     }
+
+    /// bare ctx has no module scope, so qualified types always degrade
     pub fn resolveImportAlias(_: @This(), _: []const u8, _: []const u8) ?types.TypeInfo {
         return null;
     }
@@ -543,7 +545,7 @@ fn moduleExportInto(mctx: *ModuleCtx, node: *const ast.Node, out: *std.ArrayList
                     .name = def.name,
                     .field_type = .{ .tag = .{ .struct_type = def.name } },
                 }),
-                // type aliases are comptime only so we dont car
+                // type aliases are compile-time only so skip them
                 else => {},
             }
         },

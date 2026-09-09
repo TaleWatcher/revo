@@ -308,11 +308,17 @@ pub fn clone(ti: TypeInfo, alloc: std.mem.Allocator) !TypeInfo {
         },
         .table => |tbl| {
             const key: ?*TypeInfo = if (tbl.key) |_| try alloc.create(TypeInfo) else null;
+            errdefer if (key) |k| alloc.destroy(k);
+
             if (key) |k| k.* = try clone(tbl.key.?.*, alloc);
             const value = try alloc.create(TypeInfo);
             value.* = try clone(tbl.value.*, alloc);
+            errdefer alloc.destroy(value);
+
             const fields: ?[]RecordField = if (tbl.fields) |fs| blk: {
                 const owned = try alloc.alloc(RecordField, fs.len);
+                errdefer alloc.free(owned);
+
                 for (fs, owned) |f, *dst| dst.* = .{
                     .name = try alloc.dupe(u8, f.name),
                     .field_type = try clone(f.field_type, alloc),
@@ -323,11 +329,19 @@ pub fn clone(ti: TypeInfo, alloc: std.mem.Allocator) !TypeInfo {
         },
         .function => |sig| {
             const owned = try alloc.create(FunctionSignature);
+            errdefer alloc.destroy(owned);
+
             const params = try alloc.alloc(TypeInfo, sig.params.len);
+            errdefer alloc.free(params);
+
             for (sig.params, 0..) |p, i| params[i] = try clone(p, alloc);
             const param_names = try alloc.alloc([]const u8, sig.param_names.len);
+            errdefer alloc.free(param_names);
+
             for (sig.param_names, 0..) |n, i| param_names[i] = try alloc.dupe(u8, n);
             const type_params = try alloc.alloc([]const u8, sig.type_params.len);
+            errdefer alloc.free(type_params);
+
             for (sig.type_params, 0..) |tp, i| type_params[i] = try alloc.dupe(u8, tp);
             owned.* = .{
                 .params = params,

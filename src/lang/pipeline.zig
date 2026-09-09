@@ -603,18 +603,62 @@ const UnexpandedVisitor = struct {
                     self.out.append(self.alloc, .{ .name = n, .span = callee.span }) catch return;
                 },
                 .field => |f| if (std.mem.endsWith(u8, f.name, "!")) {
-                    //
-                    // qualified `a.hi!` for plain idents, bare name otherwise
-                    if (f.object.expr == .ident) {
-                        const qualified = std.fmt.allocPrint(
-                            self.alloc,
-                            "{s}.{s}",
-                            .{ f.object.expr.ident, f.name },
-                        ) catch return;
-                        self.out.append(self.alloc, .{ .name = qualified, .span = callee.span }) catch return;
-                    } else {
-                        self.out.append(self.alloc, .{ .name = f.name, .span = callee.span }) catch return;
+                    var parts: [16][]const u8 = undefined;
+                    var part_count: usize = 0;
+                    {
+                        var cur: *const Node = f.object;
+                        while (true) {
+                            switch (cur.expr) {
+                                .ident => |n| {
+                                    parts[part_count] = n;
+                                    part_count += 1;
+                                    break;
+                                },
+                                .field => |fld| {
+                                    parts[part_count] = fld.name;
+                                    part_count += 1;
+                                    cur = fld.object;
+                                },
+                                else => break,
+                            }
+                            if (part_count == parts.len) break;
+                        }
                     }
+                    // reverse parts so they're in base..field order
+                    var i: usize = 0;
+                    var j: usize = part_count;
+                    while (i < j) {
+                        j -= 1;
+                        const tmp = parts[i];
+                        parts[i] = parts[j];
+                        parts[j] = tmp;
+                        i += 1;
+                    }
+                    // append f.name as the final field
+                    if (part_count < parts.len) {
+                        parts[part_count] = f.name;
+                        part_count += 1;
+                    }
+                    const full_name = blk: {
+                        var name = self.alloc.dupe(u8, parts[0]) catch return;
+                        for (parts[1..part_count]) |part| {
+                            const combined = std.fmt.allocPrint(
+                                self.alloc,
+                                "{s}.{s}",
+                                .{ name, part },
+                            ) catch {
+                                self.alloc.free(name);
+                                return;
+                            };
+                            self.alloc.free(name);
+                            name = combined;
+                        }
+                        break :blk name;
+                    };
+                    self.out.append(self.alloc, .{ .name = full_name, .span = callee.span }) catch {
+                        self.alloc.free(full_name);
+                        return;
+                    };
                 },
                 else => {},
             }
@@ -623,7 +667,7 @@ const UnexpandedVisitor = struct {
     }
 };
 
-/// unknown macros just liek pattern misses; both fail at runtime
+/// unknown macros are like pattern misses; both fail at runtime
 /// quasiquote pruned by the walk
 fn collectUnexpandedMacros(alloc: std.mem.Allocator, root: *const Node) ![]UnexpandedMacro {
     var out = try std.ArrayList(UnexpandedMacro).initCapacity(alloc, 4);

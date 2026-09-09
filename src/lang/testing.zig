@@ -221,8 +221,8 @@ pub fn expectCompileErrorInDir(module_dir: []const u8, source: []const u8) !void
 fn checkExpandError(vm: *revo.VM, result: lang.BuildResult, expected_message: []const u8) !void {
     switch (result) {
         .ok => |artifact| {
-            defer alloc.free(artifact.instructions);
-            defer alloc.free(artifact.spans);
+            defer vm.runtime.alloc.free(artifact.instructions);
+            defer vm.runtime.alloc.free(artifact.spans);
             return error.ExpectedCompileFailure;
         },
         .err => |failure| switch (failure) {
