@@ -220,6 +220,33 @@ pub const FunctionSignature = struct {
     doc: ?[]const u8 = null,
 };
 
+/// resolved pieces for one FunctionSignature; every builder (compiler
+/// allocFnSig, semantic make/newSig, type_parser eval) walks its own AST
+/// because error handling differs, then funnels through here
+pub const SignatureParts = struct {
+    param_names: []const []const u8,
+    params: []const TypeInfo,
+    return_type: TypeInfo = .{ .tag = .any },
+    required_count: usize = 0,
+    type_params: []const []const u8 = &.{},
+    default_values: []const ?*ast.Node = &.{},
+    doc: ?[]const u8 = null,
+};
+
+pub fn newSignature(alloc: std.mem.Allocator, parts: SignatureParts) std.mem.Allocator.Error!*FunctionSignature {
+    const sig = try alloc.create(FunctionSignature);
+    sig.* = .{
+        .param_names = parts.param_names,
+        .params = parts.params,
+        .return_type = parts.return_type,
+        .required_count = parts.required_count,
+        .type_params = parts.type_params,
+        .default_values = parts.default_values,
+        .doc = parts.doc,
+    };
+    return sig;
+}
+
 /// sentinel "any function" type,,, matches any callable value
 /// ptr identity;; only matches when &ANY_FN_SIG is used
 pub const ANY_FN_SIG: FunctionSignature = .{
@@ -840,13 +867,12 @@ pub fn substituteTypeParams(alloc: std.mem.Allocator, ti: TypeInfo, subst: anyty
             const new_params = try alloc.alloc(TypeInfo, fsig.params.len);
             for (fsig.params, new_params) |p, *np| np.* = try substituteTypeParams(alloc, p, subst);
             const new_ret = try substituteTypeParams(alloc, fsig.return_type, subst);
-            const new_sig = try alloc.create(FunctionSignature);
-            new_sig.* = FunctionSignature{
+            const new_sig = try newSignature(alloc, .{
+                .param_names = fsig.param_names,
                 .params = new_params,
                 .return_type = new_ret,
-                .param_names = fsig.param_names,
                 .type_params = fsig.type_params,
-            };
+            });
             break :blk .{ .tag = .{ .function = new_sig } };
         },
         .table => |tbl| blk: {
@@ -865,7 +891,7 @@ pub fn substituteTypeParams(alloc: std.mem.Allocator, ti: TypeInfo, subst: anyty
                 };
                 break :blk2 owned;
             } else null;
-            break :blk .{ .tag = .{ .table = .{ .key = new_key, .value = new_value, .fields = new_fields } } };
+            break :blk makeTable(new_key, new_value, new_fields);
         },
         else => ti,
     };
@@ -1091,6 +1117,13 @@ test "record rejects empty literal" {
 test "record rejects array literal" {
     try t.expectCompileError(
         \\ let a: { name: num } = { 1, 2, 3 }
+    , .ParseError);
+}
+
+test "fn alias enforces arity at call sites" {
+    try t.expectCompileError(
+        \\ type F = fn(num, num) -> num
+        \\ fn apply(f: F) f(1)
     , .ParseError);
 }
 

@@ -476,7 +476,12 @@ const SemanticChecker = struct {
                     const ret = if (meta.return_type_expr) |rt| type_parser.evalTypeExpr(self, rt) catch types_mod.TypeInfo{ .tag = .any } else types_mod.TypeInfo{ .tag = .any };
                     const names_slice = param_names.toOwnedSlice(self.alloc) catch return .{ .tag = .any };
                     const types_slice = param_types.toOwnedSlice(self.alloc) catch return .{ .tag = .any };
-                    const sig_ptr = self.newSig(names_slice, types_slice, ret, types_slice.len, &.{}, null) catch return .{ .tag = .any };
+                    const sig_ptr = types_mod.newSignature(self.alloc, .{
+                        .param_names = names_slice,
+                        .params = types_slice,
+                        .return_type = ret,
+                        .required_count = types_slice.len,
+                    }) catch return .{ .tag = .any };
                     return .{ .tag = .{ .function = sig_ptr } };
                 }
             }
@@ -501,27 +506,6 @@ const SemanticChecker = struct {
         return .{ .tag = .any };
     }
 
-    fn newSig(
-        self: *SemanticChecker,
-        names: []const []const u8,
-        types: []const types_mod.TypeInfo,
-        ret: types_mod.TypeInfo,
-        required: usize,
-        type_params: []const []const u8,
-        doc: ?[]const u8,
-    ) !*FnSig {
-        const sig_ptr = try self.alloc.create(FnSig);
-        sig_ptr.* = .{
-            .param_names = names,
-            .params = types,
-            .return_type = ret,
-            .required_count = required,
-            .type_params = type_params,
-            .doc = doc,
-        };
-        return sig_ptr;
-    }
-
     fn makeStdlibSig(self: *SemanticChecker, spec: *const revo.std_lib.api.FnSpec) !?*const FnSig {
         if (self.sig_cache.get(spec)) |sig| return sig;
         const type_params = try type_parser.sigTypeParams(self.alloc, spec.sig);
@@ -541,7 +525,14 @@ const SemanticChecker = struct {
         const types_slice = try param_types.toOwnedSlice(self.alloc);
 
         const ret = type_parser.parseTypeString(self, spec.ret) catch types_mod.TypeInfo{ .tag = .any };
-        const sig = try self.newSig(names_slice, types_slice, ret, spec.f.arity, type_params, if (spec.doc.len > 0) spec.doc else null);
+        const sig = try types_mod.newSignature(self.alloc, .{
+            .param_names = names_slice,
+            .params = types_slice,
+            .return_type = ret,
+            .required_count = spec.f.arity,
+            .type_params = type_params,
+            .doc = if (spec.doc.len > 0) spec.doc else null,
+        });
 
         try self.sig_cache.put(spec, sig);
         try self.stdlib_sig_ptrs.append(self.alloc, sig);
@@ -561,7 +552,14 @@ const SemanticChecker = struct {
         const names_slice = try param_names.toOwnedSlice(self.alloc);
         const ret = if (fn_expr.return_type) |rt| try type_parser.evalTypeExpr(self, rt) else types_mod.TypeInfo{ .tag = .any };
         const doc: ?[]const u8 = if (@hasField(@TypeOf(fn_expr), "doc")) fn_expr.doc else null;
-        return self.newSig(names_slice, params_slice, ret, required_count, fn_expr.type_params, doc);
+        return try types_mod.newSignature(self.alloc, .{
+            .param_names = names_slice,
+            .params = params_slice,
+            .return_type = ret,
+            .required_count = required_count,
+            .type_params = fn_expr.type_params,
+            .doc = doc,
+        });
     }
 
     fn analyzeFnBody(self: *SemanticChecker, fn_expr: anytype, sig: *FnSig) !types_mod.TypeInfo {
@@ -823,7 +821,12 @@ const SemanticChecker = struct {
                         const types_slice = param_types
                             .toOwnedSlice(self.alloc) catch break :blk .{ .tag = .any };
 
-                        const sig_ptr = self.newSig(names_slice, types_slice, ret, types_slice.len, &.{}, null) catch break :blk .{ .tag = .any };
+                        const sig_ptr = types_mod.newSignature(self.alloc, .{
+                            .param_names = names_slice,
+                            .params = types_slice,
+                            .return_type = ret,
+                            .required_count = types_slice.len,
+                        }) catch break :blk .{ .tag = .any };
 
                         try fields.put(meta.name, .{ .tag = .{ .function = sig_ptr } });
                     }

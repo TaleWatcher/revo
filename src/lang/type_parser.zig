@@ -282,13 +282,12 @@ pub fn evalTypeExpr(ctx: anytype, te: *const ast.TypeExpr) !TypeInfo {
             for (f.params) |p| try param_names.append(ctx.alloc, p.name);
             const return_type = if (f.return_type) |rt| try evalTypeExpr(ctx, rt) else TypeInfo{ .tag = .any };
 
-            const sig = try ctx.alloc.create(types.FunctionSignature);
-            sig.* = .{
+            const sig = try types.newSignature(ctx.alloc, .{
                 .param_names = try param_names.toOwnedSlice(ctx.alloc),
                 .params = try param_types.toOwnedSlice(ctx.alloc),
                 .return_type = return_type,
-                .required_count = param_types.items.len,
-            };
+                .required_count = f.params.len,
+            });
 
             return .{ .tag = .{ .function = sig } };
         },

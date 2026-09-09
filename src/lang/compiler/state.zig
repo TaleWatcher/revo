@@ -438,9 +438,6 @@ pub fn allocFnSig(
     return_type: ?*ast.TypeExpr,
     type_params: []const []const u8,
 ) !*types.FunctionSignature {
-    const sig = try self.alloc.create(types.FunctionSignature);
-    errdefer self.alloc.destroy(sig);
-
     var param_names = try std.ArrayList([]const u8).initCapacity(self.alloc, params.len);
     errdefer param_names.deinit(self.alloc);
     for (params) |p| try param_names.append(self.alloc, p.name);
@@ -461,18 +458,17 @@ pub fn allocFnSig(
     errdefer default_values.deinit(self.alloc);
     for (params) |p| try default_values.append(self.alloc, p.default_value);
 
-    sig.* = .{
+    return try types.newSignature(self.alloc, .{
         .param_names = try param_names.toOwnedSlice(self.alloc),
         .params = try param_types.toOwnedSlice(self.alloc),
-        .required_count = required_count,
-        .type_params = type_params,
         .return_type = if (return_type) |rt|
             type_parser.evalTypeExpr(self, rt) catch types.TypeInfo{ .tag = .any }
         else
             types.TypeInfo{ .tag = .any },
+        .required_count = required_count,
+        .type_params = type_params,
         .default_values = try default_values.toOwnedSlice(self.alloc),
-    };
-    return sig;
+    });
 }
 
 pub fn declareFnSignature(
