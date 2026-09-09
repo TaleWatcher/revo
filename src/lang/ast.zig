@@ -211,6 +211,17 @@ pub fn atomName(name: []const u8) []const u8 {
     return if (name.len > 0 and name[0] == ':') name[1..] else name;
 }
 
+/// static `name = v` / `:name = v` key, or null for computed keys,
+/// dynamic keys, and keyless entries
+pub fn staticFieldName(entry: TableEntry) ?[]const u8 {
+    if (entry.computed) return null;
+    const key = entry.key orelse return null;
+    return switch (key.expr) {
+        .ident, .hash => |name| name,
+        else => null,
+    };
+}
+
 pub const FnParam = struct {
     name: []const u8,
     name_span: Span,
@@ -998,21 +1009,6 @@ test "prints break and return empty and valued forms" {
 
     try return_value.print(&buf.writer);
     try std.testing.expectEqualStrings("(return 1)", buf.written());
-}
-
-pub fn walkTypeExpr(te: *const TypeExpr) void {
-    switch (te.kind) {
-        .tuple => |items| for (items) |item| walkTypeExpr(item),
-        .union_of => |variants| for (variants) |v| walkTypeExpr(v),
-        .record => |fields| for (fields) |f| walkTypeExpr(f.type_expr),
-        .function => |f| {
-            for (f.params) |p| {
-                if (p.type_name) |t| walkTypeExpr(t);
-            }
-            if (f.return_type) |ret| walkTypeExpr(ret);
-        },
-        .named, .atom => {},
-    }
 }
 
 fn walkTypeExprWithVisitor(comptime Visitor: type, visitor: *Visitor, te: *const TypeExpr) void {

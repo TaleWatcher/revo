@@ -21,7 +21,6 @@ pub const LocalVar = struct {
     kind: LocalValueKind = .unknown,
     type_info: ?types.TypeInfo = null,
     type_explicit: bool = false,
-    table_fields: ?[]const []const u8 = null,
 };
 
 pub const CachedSlot = struct { idx: usize, gen: u32 };
@@ -254,12 +253,6 @@ pub fn setLocalTypeExplicit(self: *Compiler, slot: LocalSlot) void {
     const state = currentFunctionState(self) orelse return;
     if (scanLocals(state.locals.items, slot)) |l| l.type_explicit = true;
     if (scanLocals(state.all_locals.items, slot)) |l| l.type_explicit = true;
-}
-
-pub fn setLocalTableFields(self: *Compiler, slot: LocalSlot, fields: ?[]const []const u8) void {
-    const state = currentFunctionState(self) orelse return;
-    if (scanLocals(state.locals.items, slot)) |l| l.table_fields = fields;
-    if (scanLocals(state.all_locals.items, slot)) |l| l.table_fields = fields;
 }
 
 pub fn setLocalTypeHint(self: *Compiler, name: []const u8, type_info: types.TypeInfo) !void {

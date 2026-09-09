@@ -1093,10 +1093,8 @@ pub const Compiler = struct {
         args: []const *Node,
         implicit_self: bool,
     ) InternalLowerError!bool {
-        const module_name = switch (type_check.inferExprType(
-            self,
-            field.object,
-        ).tag) {
+        const object_type = type_check.inferExprType(self, field.object);
+        const module_name = switch (object_type.tag) {
             .string => "string",
             .tuple => "tuple",
             .table => "table",
@@ -1107,15 +1105,11 @@ pub const Compiler = struct {
         if (std.mem.eql(u8, module_name, "table") and
             std.mem.eql(u8, field.name, "add")) return false;
 
-        if (std.mem.eql(u8, module_name, "table") and
-            field.object.expr == .ident)
-        {
-            const local_ = state_mod.resolveLocalVar(self, field.object.expr.ident);
-            const fields = if (local_) |l| l.table_fields else null;
-            if (fields) |fs| {
-                for (fs) |f| {
-                    if (std.mem.eql(u8, f, field.name)) return false;
-                }
+        // a known field shadows the stdlib method of the same name;
+        // works for any table expression with a known shape, not just locals
+        if (object_type.tag == .table) {
+            if (object_type.tag.table.fields) |fs| {
+                if (types.findField(fs, field.name) != null) return false;
             }
         }
 

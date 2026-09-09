@@ -420,10 +420,16 @@ const SemanticChecker = struct {
 
     pub fn inferFieldType(self: *SemanticChecker, object: *const ast.Node, name: []const u8) types_mod.TypeInfo {
         const object_type = types_mod.inferExprType(self, object);
-        // user-defined table fields shadow stdlib methods
-        if (object_type.tag == .table and object.expr == .ident) {
-            if (self.table_field_map.get(object.expr.ident)) |fields| {
-                if (fields.get(name)) |ft| return ft;
+        // user-defined table fields shadow stdlib methods: literal shapes
+        // first, flow-sensitive assignment tracking second
+        if (object_type.tag == .table) {
+            if (object_type.tag.table.fields) |fs| {
+                if (types_mod.findField(fs, name)) |f| return f.field_type;
+            }
+            if (object.expr == .ident) {
+                if (self.table_field_map.get(object.expr.ident)) |fields| {
+                    if (fields.get(name)) |ft| return ft;
+                }
             }
         }
         // method lookup for string, tuple, and table
@@ -1139,7 +1145,7 @@ const SemanticChecker = struct {
         for (variants) |variant| {
             // first T is the tag atom; payload is the rest
             if (variant.types.len > 0 and variant.types[0].tag == .atom) {
-                const variant_tag = types_mod.atomPayload(variant.types[0].tag.atom);
+                const variant_tag = ast.atomName(variant.types[0].tag.atom);
                 const pattern_tag = if (tag[0] == ':') tag[1..] else tag;
                 if (std.mem.eql(u8, variant_tag, pattern_tag)) {
                     return variant.types[1..];

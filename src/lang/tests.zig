@@ -216,13 +216,13 @@ test "computed key does not invalidate table field tracking" {
 }
 
 //
-// known limitation: table_fields is per-variable, not per-table
+// known limitation: hint widening is per-variable, not per-table
 // when two variables share the same underlying table, only the variable
-// that received the direct assignment has its table_fields updated
+// that received the direct assignment has its hint widened
 //
 
 test "shared alias mutation shadows stdlib method" {
-    // known limitation: table_fields is per-variable, not per-table
+    // known limitation: hint widening is per-variable, not per-table
     // x gets tracking for len but t doesnt, so t:len() binds to stdlib
     return error.SkipZigTest;
 }

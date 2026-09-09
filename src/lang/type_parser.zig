@@ -322,10 +322,9 @@ pub fn evalTypeExpr(ctx: anytype, te: *const ast.TypeExpr) !TypeInfo {
                 .name = f.name,
                 .field_type = try evalTypeExpr(ctx, f.type_expr),
             };
-
             const value = try ctx.alloc.create(TypeInfo);
             value.* = .{ .tag = .any };
-            return .{ .tag = .{ .table = .{ .key = null, .value = value, .fields = owned } } };
+            return types.makeTable(null, value, owned);
         },
         // "!int" -> union(@[{name="", types=@[:ok, int]}, {name="", types=@[:err, any]}])
         // the same shape the literal `(:ok, int) | (:err, any)` produces

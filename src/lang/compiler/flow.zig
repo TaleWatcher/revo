@@ -830,7 +830,7 @@ fn narrowMatchPattern(
         const vt = variant.types;
         if (vt.len == 0 or vt[0].tag != .atom) continue;
 
-        const variant_tag = types_mod.atomPayload(vt[0].tag.atom);
+        const variant_tag = ast.atomName(vt[0].tag.atom);
         const pattern_tag = if (tag.len > 0 and tag[0] == ':') tag[1..] else tag;
         if (!std.mem.eql(u8, variant_tag, pattern_tag)) continue;
 

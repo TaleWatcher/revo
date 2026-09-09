@@ -68,7 +68,6 @@ pub fn compileLocalBinding(
         slot,
         if (value.expr == .tuple) .tuple_literal else .unknown,
     );
-    try syncLocalTableFields(self, slot, value);
 
     const inferred_type = if (type_name) |tn|
         try type_check.evalTypeExpr(self, tn)
@@ -247,7 +246,6 @@ fn compileAssignSimple(
                     return self.fail(.CompileError, target, "reassignment to constant!");
                 try self.emit(.store_local, slot);
                 state.markLocalValueKind(self, slot, .unknown);
-                try syncLocalTableFields(self, slot, value);
                 const inferred_type = type_check.inferExprType(self, value);
                 try state.setLocalTypeHint(self, name, inferred_type);
             } else if (try state.resolveUpvalue(self, name)) |slot| {
@@ -315,7 +313,7 @@ fn compileAssignSimple(
                     try self.compile(value, true);
                     try self.emit(.table_set_atom, key_atom);
                     try self.emit(.table_get_atom, key_atom);
-                    try addFieldToLocalTableFields(self, field.object, field.name);
+                    try widenLocalTableHint(self, field.object, field.name, value);
                 },
             }
         },
@@ -327,7 +325,7 @@ fn compileAssignSimple(
                 try self.compile(value, true);
                 try self.emit(.table_set_atom, key_atom);
                 try self.emit(.table_get_atom, key_atom);
-                try addFieldToLocalTableFields(self, index.object, index.key.expr.hash);
+                try widenLocalTableHint(self, index.object, index.key.expr.hash, value);
             } else {
                 // evaluate object + key once; re-materialize them after the
                 // set so the get doesn't re-evaluate either operand
@@ -362,68 +360,29 @@ fn moveInstTo(self: *Compiler, dst: revo.opcode.Register, src: *ir.IrInst) !void
     _ = try self.record(.move, &.{.{ .inst = src }}, true, dst, 0);
 }
 
-fn addFieldToLocalTableFields(self: *Compiler, object: *const Node, field_name: []const u8) !void {
+/// `t.f = v`: extend t's known fields so later lookups see f.
+/// copy-on-write over the hint's field list, never mutates shared slices;
+/// unknown shapes (plain `table`) start a fresh list. hint-scoped, so a
+/// conditional add only persists inside its scope
+fn widenLocalTableHint(self: *Compiler, object: *const Node, field_name: []const u8, value: *const Node) !void {
     if (object.expr != .ident) return;
     const name = object.expr.ident;
-    const local = state.resolveLocalVar(self, name) orelse return;
-    if (local.table_fields) |fields| {
-        for (fields) |f| if (std.mem.eql(u8, f, field_name)) return;
+    const hint = state.resolveLocalTypeHint(self, name) orelse return;
+    if (hint.tag != .table) return;
+    const field_type = type_check.inferExprType(self, value);
+    const old = if (hint.tag.table.fields) |fs| fs else &[_]types_mod.RecordField{};
+    var widened = hint;
+    if (types_mod.findFieldIndex(old, field_name)) |i| {
+        const owned = try self.alloc.dupe(types_mod.RecordField, old);
+        owned[i].field_type = field_type;
+        widened.tag.table.fields = owned;
+    } else {
+        const owned = try self.alloc.alloc(types_mod.RecordField, old.len + 1);
+        @memcpy(owned[0..old.len], old);
+        owned[old.len] = .{ .name = field_name, .field_type = field_type };
+        widened.tag.table.fields = owned;
     }
-    const field_dup = try self.alloc.dupe(u8, field_name);
-    const old = local.table_fields orelse &[_][]const u8{};
-    const new_fields = try self.alloc.alloc([]const u8, old.len + 1);
-    @memcpy(new_fields[0..old.len], old);
-    new_fields[old.len] = field_dup;
-    state.setLocalTableFields(self, local.slot, new_fields);
-}
-
-fn applyLocalTableFields(
-    self: *Compiler,
-    slot: revo.LocalSlot,
-    entries: []const TableEntry,
-) !void {
-    var fields = try std.ArrayList([]const u8).initCapacity(
-        self.alloc,
-        entries.len,
-    );
-    defer fields.deinit(self.alloc);
-
-    for (entries) |entry| {
-        if (entry.computed or entry.key == null) continue;
-        if (entry.key) |key| switch (key.expr) {
-            .ident => |name| try fields.append(self.alloc, name),
-            .hash => |name| try fields.append(self.alloc, name),
-            else => {},
-        };
-    }
-
-    if (fields.items.len == 0) {
-        state.setLocalTableFields(self, slot, null);
-        return;
-    }
-    state.setLocalTableFields(
-        self,
-        slot,
-        try fields.toOwnedSlice(self.alloc),
-    );
-}
-
-fn syncLocalTableFields(
-    self: *Compiler,
-    slot: revo.LocalSlot,
-    value: *const Node,
-) !void {
-    switch (value.expr) {
-        .table => try applyLocalTableFields(self, slot, value.expr.table),
-        .ident => |name| {
-            const source = state.resolveLocalVar(self, name) orelse {
-                state.setLocalTableFields(self, slot, null);
-                return;
-            };
-            state.setLocalTableFields(self, slot, source.table_fields);
-        },
-        else => state.setLocalTableFields(self, slot, null),
-    }
+    try state.setLocalTypeHint(self, name, widened);
 }
 
 fn compileFieldAssign(
@@ -438,7 +397,7 @@ fn compileFieldAssign(
     try self.compile(value, true);
     try self.emit(.table_set_atom, key_atom);
     try self.emit(.table_get_atom, key_atom);
-    try addFieldToLocalTableFields(self, field_obj, field_name);
+    try widenLocalTableHint(self, field_obj, field_name, value);
 }
 
 pub fn compileStruct(

@@ -13,6 +13,24 @@ pub const RecordField = struct {
     field_type: TypeInfo,
 };
 
+/// build a table TypeInfo; the key/value ptrs borrow the caller's
+/// storage, arena-owned in practice like every other TypeInfo
+pub fn makeTable(key: ?*const TypeInfo, value: *const TypeInfo, fields: ?[]RecordField) TypeInfo {
+    return .{ .tag = .{ .table = .{ .key = key, .value = value, .fields = fields } } };
+}
+
+/// linear field lookup by name; field lists stay small, no map needed
+pub fn findField(fields: []const RecordField, name: []const u8) ?RecordField {
+    for (fields) |f| if (std.mem.eql(u8, f.name, name)) return f;
+    return null;
+}
+
+/// index variant, for replacing a field in place (dupes: last wins)
+pub fn findFieldIndex(fields: []const RecordField, name: []const u8) ?usize {
+    for (fields, 0..) |f, i| if (std.mem.eql(u8, f.name, name)) return i;
+    return null;
+}
+
 pub const TypeInfo = struct {
     tag: Tag,
     doc: ?[]const u8 = null,
@@ -42,7 +60,7 @@ pub const TypeInfo = struct {
             .bool => other.tag == .bool,
             .number => other.tag == .number,
             .string => other.tag == .string,
-            .atom => |a| if (other.tag == .atom) std.mem.eql(u8, atomPayload(a), atomPayload(other.tag.atom)) else false,
+            .atom => |a| if (other.tag == .atom) std.mem.eql(u8, ast.atomName(a), ast.atomName(other.tag.atom)) else false,
             .struct_type => |s| if (other.tag == .struct_type) std.mem.eql(u8, s, other.tag.struct_type) else false,
             .tuple => |ts| if (other.tag == .tuple) blk: {
                 if (ts.len != other.tag.tuple.len) break :blk false;
@@ -127,7 +145,7 @@ pub const TypeInfo = struct {
             .type_var => |n| try namedExpr(alloc, n),
             .struct_type => |n| try namedExpr(alloc, n),
             // empty atom payload is the "any atom" sentinel
-            .atom => |s| if (s.len == 0) try namedExpr(alloc, "atom") else try ast.allocTypeExpr(alloc, empty_span, .{ .atom = atomPayload(s) }),
+            .atom => |s| if (s.len == 0) try namedExpr(alloc, "atom") else try ast.allocTypeExpr(alloc, empty_span, .{ .atom = ast.atomName(s) }),
             // empty tuple is the "any tuple" sentinel
             .tuple => |items| if (items.len == 0) try namedExpr(alloc, "tuple") else blk: {
                 const owned = try alloc.alloc(*ast.TypeExpr, items.len);
@@ -184,10 +202,6 @@ pub const TypeInfo = struct {
     }
 };
 
-pub fn atomPayload(name: []const u8) []const u8 {
-    return if (name.len > 0 and name[0] == ':') name[1..] else name;
-}
-
 pub const FieldDef = struct {
     name: []const u8,
     field_type: TypeInfo,
@@ -218,7 +232,7 @@ pub const ANY_FN_SIG: FunctionSignature = .{
 /// sentinel type info for `any` used by the generic table sentinel
 const ANY_TI: TypeInfo = .{ .tag = .any };
 /// sentinel for a generic table (no key/value constraints)
-pub const TABLE_GENERIC: TypeInfo = .{ .tag = .{ .table = .{ .key = null, .value = &ANY_TI } } };
+pub const TABLE_GENERIC: TypeInfo = makeTable(null, &ANY_TI, null);
 
 pub fn typeName(T: TypeInfo, alloc: std.mem.Allocator) ![]const u8 {
     return switch (T.tag) {
@@ -234,7 +248,10 @@ pub fn typeName(T: TypeInfo, alloc: std.mem.Allocator) ![]const u8 {
         },
         .struct_type, .type_var => |s| try alloc.dupe(u8, s),
         .table => try alloc.dupe(u8, "table"),
-        else => try alloc.dupe(u8, @tagName(T.tag)),
+        // leaves spelled out so a future payload-carrying tag breaks
+        // compilation here instead of silently printing its tag name
+        .function => try alloc.dupe(u8, "function"),
+        .bool, .number, .string, .any, .never, .tuple, .@"union" => try alloc.dupe(u8, @tagName(T.tag)),
     };
 }
 
@@ -357,10 +374,8 @@ pub fn canCoerce(from: TypeInfo, to: TypeInfo) bool {
         if (to_table.fields) |wants| {
             if (from_table.fields) |haves| {
                 for (wants) |w| {
-                    const have = for (haves) |h| {
-                        if (std.mem.eql(u8, h.name, w.name)) break h.field_type;
-                    } else return false;
-                    if (!canCoerce(have, w.field_type)) return false;
+                    const have = findField(haves, w.name) orelse return false;
+                    if (!canCoerce(have.field_type, w.field_type)) return false;
                 }
                 return true;
             }
@@ -400,7 +415,7 @@ pub fn canCoerce(from: TypeInfo, to: TypeInfo) bool {
     }
     // :true and :false are bool
     if (to.tag == .bool and from.tag == .atom) {
-        const name = atomPayload(from.tag.atom);
+        const name = ast.atomName(from.tag.atom);
         return std.mem.eql(u8, name, "true") or std.mem.eql(u8, name, "false");
     }
     if (to.tag == .@"union") {
@@ -408,7 +423,7 @@ pub fn canCoerce(from: TypeInfo, to: TypeInfo) bool {
         if (from.tag == .atom) {
             for (to.tag.@"union") |variant| {
                 if (variant.types.len == 1 and variant.types[0].tag == .atom) {
-                    if (std.mem.eql(u8, atomPayload(variant.types[0].tag.atom), atomPayload(from.tag.atom))) return true;
+                    if (std.mem.eql(u8, ast.atomName(variant.types[0].tag.atom), ast.atomName(from.tag.atom))) return true;
                 }
             }
         }
@@ -517,14 +532,14 @@ pub fn isResultType(ti: TypeInfo) bool {
     return switch (ti.tag) {
         .@"union" => |us| blk: {
             for (us) |v| {
-                if (v.types.len >= 2 and v.types[0].tag == .atom and isResultTag(atomPayload(v.types[0].tag.atom))) {
+                if (v.types.len >= 2 and v.types[0].tag == .atom and isResultTag(ast.atomName(v.types[0].tag.atom))) {
                     break :blk true;
                 }
             }
             break :blk false;
         },
         .tuple => |items| items.len >= 1 and items[0].tag == .atom and blk: {
-            const at = atomPayload(items[0].tag.atom);
+            const at = ast.atomName(items[0].tag.atom);
             break :blk isResultTag(at);
         },
         else => false,
@@ -538,7 +553,7 @@ pub fn okTypeFrom(ti: TypeInfo) TypeInfo {
     return switch (ti.tag) {
         .@"union" => |variants| blk: {
             for (variants) |v| {
-                if (v.types.len >= 2 and v.types[0].tag == .atom and isOkTag(atomPayload(v.types[0].tag.atom))) {
+                if (v.types.len >= 2 and v.types[0].tag == .atom and isOkTag(ast.atomName(v.types[0].tag.atom))) {
                     break :blk v.types[1];
                 }
             }
@@ -546,7 +561,7 @@ pub fn okTypeFrom(ti: TypeInfo) TypeInfo {
         },
         .tuple => |items| blk: {
             if (items.len < 2 or items[0].tag != .atom) break :blk .{ .tag = .any };
-            const at = atomPayload(items[0].tag.atom);
+            const at = ast.atomName(items[0].tag.atom);
             if (!isOkTag(at)) break :blk .{ .tag = .any };
             break :blk items[1];
         },
@@ -669,24 +684,16 @@ fn inferTableType(ctx: anytype, entries: []const ast.TableEntry) TypeInfo {
         }
         const field_type = inferExprType(ctx, entry.value);
         value_type = mergeInferredType(value_type, field_type);
-        if (entry.key) |key| {
-            const inferred_key = inferTableKeyType(ctx, key, entry.computed);
+        if (entry.key != null) {
+            const inferred_key = inferTableKeyType(ctx, entry);
             key_type = if (saw_explicit_key) mergeInferredType(key_type, inferred_key) else inferred_key;
             saw_explicit_key = true;
             // static `name = v` keys become record fields; dupes replace,
             // last wins like the runtime
-            if (!entry.computed) {
-                switch (key.expr) {
-                    .ident, .hash => |name| {
-                        const slot = for (fields.items, 0..) |f, i| {
-                            if (std.mem.eql(u8, f.name, name)) break i;
-                        } else null;
-                        if (slot) |i| {
-                            fields.items[i].field_type = field_type;
-                        } else fields.append(ctx.alloc, .{ .name = name, .field_type = field_type }) catch return .{ .tag = .any };
-                    },
-                    else => {},
-                }
+            if (ast.staticFieldName(entry)) |name| {
+                if (findFieldIndex(fields.items, name)) |i| {
+                    fields.items[i].field_type = field_type;
+                } else fields.append(ctx.alloc, .{ .name = name, .field_type = field_type }) catch return .{ .tag = .any };
             }
         } else {
             saw_implicit_key = true;
@@ -702,23 +709,19 @@ fn inferTableType(ctx: anytype, entries: []const ast.TableEntry) TypeInfo {
     const known_fields: ?[]RecordField = fields.toOwnedSlice(ctx.alloc) catch return .{ .tag = .any };
 
     if (!saw_explicit_key) {
-        return .{ .tag = .{ .table = .{ .key = null, .value = value_ptr, .fields = known_fields } } };
+        return makeTable(null, value_ptr, known_fields);
     }
 
     if (saw_implicit_key) key_type = mergeInferredType(key_type, .{ .tag = .number });
     const key_ptr = ctx.alloc.create(TypeInfo) catch return .{ .tag = .any };
     key_ptr.* = key_type;
-    return .{ .tag = .{ .table = .{ .key = key_ptr, .value = value_ptr, .fields = known_fields } } };
+    return makeTable(key_ptr, value_ptr, known_fields);
 }
 
-fn inferTableKeyType(ctx: anytype, key: *const ast.Node, computed: bool) TypeInfo {
-    if (!computed) {
-        return switch (key.expr) {
-            .ident, .hash => .{ .tag = .string },
-            else => inferExprType(ctx, key),
-        };
-    }
-    return inferExprType(ctx, key);
+fn inferTableKeyType(ctx: anytype, entry: ast.TableEntry) TypeInfo {
+    if (ast.staticFieldName(entry)) |_| return .{ .tag = .string };
+    if (entry.key) |key| return inferExprType(ctx, key);
+    return .{ .tag = .any };
 }
 
 fn mergeInferredType(current: TypeInfo, next: TypeInfo) TypeInfo {
@@ -794,12 +797,7 @@ fn bindTypeParam(subst: anytype, param: TypeInfo, arg: TypeInfo) anyerror!void {
             if (tbl.fields) |pfs| {
                 if (arg.tag.table.fields) |afs| {
                     for (pfs) |pf| {
-                        for (afs) |af| {
-                            if (std.mem.eql(u8, pf.name, af.name)) {
-                                try bindTypeParam(subst, pf.field_type, af.field_type);
-                                break;
-                            }
-                        }
+                        if (findField(afs, pf.name)) |af| try bindTypeParam(subst, pf.field_type, af.field_type);
                     }
                 }
             }
@@ -818,7 +816,7 @@ fn bindTypeParam(subst: anytype, param: TypeInfo, arg: TypeInfo) anyerror!void {
                 for (arg.tag.@"union") |av| {
                     if (av.types.len != pv.types.len) continue;
                     if (av.types[0].tag != .atom or av.types[0].tag.atom.len == 0) continue;
-                    if (!std.mem.eql(u8, atomPayload(pv.types[0].tag.atom), atomPayload(av.types[0].tag.atom))) continue;
+                    if (!std.mem.eql(u8, ast.atomName(pv.types[0].tag.atom), ast.atomName(av.types[0].tag.atom))) continue;
                     for (pv.types[1..], av.types[1..]) |p, a| try bindTypeParam(subst, p, a);
                     break;
                 }
