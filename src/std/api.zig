@@ -451,21 +451,22 @@ pub fn specFromDecl(alloc: std.mem.Allocator, alias: ast.TypeAlias, doc: ?[]cons
 
     if (alias.type_expr.kind != .function) {
         // non-function alias: a named type, documented like a value
-        var doc_buf = std.ArrayList(u8).empty;
-        defer doc_buf.deinit(alloc);
-        try doc_buf.appendSlice(alloc, "alias for `");
-        try renderType(alloc, &doc_buf, alias.type_expr);
-        try doc_buf.appendSlice(alloc, "`");
+        var doc_buf = std.Io.Writer.Allocating.init(alloc);
+        defer doc_buf.deinit();
+        try doc_buf.writer.writeAll("alias for `");
+        try alias.type_expr.printAt(&doc_buf.writer, null);
+        try doc_buf.writer.writeAll("`");
+
         if (doc) |d| {
-            try doc_buf.appendSlice(alloc, "\n\n");
-            try doc_buf.appendSlice(alloc, d);
+            try doc_buf.writer.writeAll("\n\n");
+            try doc_buf.writer.writeAll(d);
         }
         return .{
             .name = try alloc.dupe(u8, name),
             .sig = try alloc.dupe(u8, head),
             .params = &.{},
             .ret = "",
-            .doc = try alloc.dupe(u8, std.mem.trimEnd(u8, doc_buf.items, "\n")),
+            .doc = try alloc.dupe(u8, std.mem.trimEnd(u8, doc_buf.written(), "\n")),
             .is_value = true,
             .f = undefined,
         };
@@ -483,12 +484,12 @@ fn specFromStruct(alloc: std.mem.Allocator, s: anytype, doc: []const u8) !FnSpec
         switch (item) {
             .field => |f| {
                 const fdoc = f.doc orelse continue;
-                var type_buf = std.ArrayList(u8).empty;
-                defer type_buf.deinit(alloc);
-                if (f.type_name) |tn| try renderType(alloc, &type_buf, tn);
+                var type_buf = std.Io.Writer.Allocating.init(alloc);
+                defer type_buf.deinit();
+                if (f.type_name) |tn| try tn.printAt(&type_buf.writer, null);
                 try fields.append(alloc, .{
                     .name = try alloc.dupe(u8, f.name),
-                    .type_text = try alloc.dupe(u8, type_buf.items),
+                    .type_text = try alloc.dupe(u8, type_buf.written()),
                     .doc = try alloc.dupe(u8, fdoc),
                 });
             },
@@ -527,24 +528,22 @@ pub fn specFromFn(
     errdefer defaults.deinit(alloc);
 
     var variadic = false;
-    var rendered = std.ArrayList(u8).empty;
-    defer rendered.deinit(alloc);
+    var rendered = std.Io.Writer.Allocating.init(alloc);
+    defer rendered.deinit();
 
     for (params_in) |p| {
         rendered.clearRetainingCapacity();
         if (p.type_name) |tn| {
-            try renderType(alloc, &rendered, tn);
+            try tn.printAt(&rendered.writer, null);
         } else if (strict) {
             return error.IfaceParamNotTyped;
         }
         if (p.variadic) {
             variadic = true;
-            try rendered.append(alloc, '.');
-            try rendered.append(alloc, '.');
-            try rendered.append(alloc, '.');
+            try rendered.writer.writeAll("...");
         }
 
-        try params.append(alloc, .{ try alloc.dupe(u8, p.name), try alloc.dupe(u8, rendered.items) });
+        try params.append(alloc, .{ try alloc.dupe(u8, p.name), try alloc.dupe(u8, rendered.written()) });
         try defaults.append(alloc, p.default_value);
     }
 
@@ -559,12 +558,12 @@ pub fn specFromFn(
         }
     }
 
-    var ret = std.ArrayList(u8).empty;
-    defer ret.deinit(alloc);
-    if (return_type) |r| try renderType(alloc, &ret, r);
+    var ret = std.Io.Writer.Allocating.init(alloc);
+    defer ret.deinit();
+    if (return_type) |r| try r.printAt(&ret.writer, null);
 
-    const sig = if (ret.items.len > 0)
-        try std.fmt.allocPrint(alloc, "{s}({s}) -> {s}", .{ head, args.items, ret.items })
+    const sig = if (ret.written().len > 0)
+        try std.fmt.allocPrint(alloc, "{s}({s}) -> {s}", .{ head, args.items, ret.written() })
     else
         try std.fmt.allocPrint(alloc, "{s}({s})", .{ head, args.items });
 
@@ -590,82 +589,13 @@ pub fn specFromFn(
         .name = try alloc.dupe(u8, name),
         .sig = sig,
         .params = try params.toOwnedSlice(alloc),
-        .ret = try alloc.dupe(u8, ret.items),
+        .ret = try alloc.dupe(u8, ret.written()),
         .doc = try alloc.dupe(u8, std.mem.trimEnd(u8, doc_buf.items, "\n")),
         .variadic = variadic,
         .core_key = core_key,
         .default_values = try defaults.toOwnedSlice(alloc),
         .f = undefined,
     };
-}
-
-/// type expr back to the compact sig text: `num|atom`, `table?`,
-/// `(:err, T)`, `!table`. `?`-suffixed idents come back from the parser as
-/// a 2-union ending in `:nil` and are re-rendered with the `?` for docgen
-fn renderType(alloc: std.mem.Allocator, out: *std.ArrayList(u8), te: *const ast.TypeExpr) !void {
-    switch (te.kind) {
-        .named => |name| try out.appendSlice(alloc, name),
-        .atom => |name| try out.appendSlice(alloc, name),
-        .tuple => |items| {
-            try out.append(alloc, '(');
-            for (items, 0..) |it, i| {
-                if (i > 0) try out.appendSlice(alloc, ", ");
-                try renderType(alloc, out, it);
-            }
-            try out.append(alloc, ')');
-        },
-        .union_of => |variants| {
-            if (variants.len == 2 and variants[1].kind == .atom and
-                std.mem.eql(u8, variants[1].kind.atom, ":nil"))
-            {
-                try renderType(alloc, out, variants[0]);
-                try out.append(alloc, '?');
-            } else for (variants, 0..) |v, i| {
-                if (i > 0) try out.append(alloc, '|');
-                try renderType(alloc, out, v);
-            }
-        },
-        .function => |f| {
-            try out.appendSlice(alloc, "fn(");
-            for (f.params, 0..) |p, i| {
-                if (i > 0) try out.appendSlice(alloc, ", ");
-                try out.appendSlice(alloc, p.name);
-                if (p.type_name) |t| {
-                    try out.append(alloc, ':');
-                    try renderType(alloc, out, t);
-                }
-                if (p.variadic) try out.appendSlice(alloc, "...");
-            }
-            try out.append(alloc, ')');
-            if (f.return_type) |r| {
-                try out.appendSlice(alloc, " -> ");
-                try renderType(alloc, out, r);
-            }
-        },
-        .parameterized => |p| {
-            try out.appendSlice(alloc, p.name);
-            try out.append(alloc, '<');
-            for (p.params, 0..) |it, i| {
-                if (i > 0) try out.appendSlice(alloc, ", ");
-                try renderType(alloc, out, it);
-            }
-            try out.append(alloc, '>');
-        },
-        .error_union => |inner| {
-            try out.append(alloc, '!');
-            try renderType(alloc, out, inner);
-        },
-        .record => |fields| {
-            try out.append(alloc, '{');
-            for (fields, 0..) |f, i| {
-                if (i > 0) try out.appendSlice(alloc, ", ");
-                try out.appendSlice(alloc, f.name);
-                try out.appendSlice(alloc, ": ");
-                try renderType(alloc, out, f.type_expr);
-            }
-            try out.append(alloc, '}');
-        },
-    }
 }
 
 /// markdown is the authoring form; strip fences and dedent the code block

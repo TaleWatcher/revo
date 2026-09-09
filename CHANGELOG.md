@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- type-to-string rendering is unified
+
 ### Fixed
 
 - host functions dropped explicit `:false` bool args: `unwrapArg` used `isBoolAtom` (true for both `:true`

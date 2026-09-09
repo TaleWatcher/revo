@@ -131,7 +131,9 @@ pub const TypeExpr = struct {
         _ = depth;
         switch (self.kind) {
             .named => |name| try writer.writeAll(name),
-            .atom => |name| try writer.print(":{s}", .{name}),
+            // atom payloads come both bare (`nil` from the main parser)
+            // and colon-prefixed (`:nil` from the type parser)
+            .atom => |name| try writer.print(":{s}", .{atomName(name)}),
             .tuple => |items| {
                 try writer.writeByte('(');
                 for (items, 0..) |item, i| {
@@ -141,8 +143,14 @@ pub const TypeExpr = struct {
                 try writer.writeByte(')');
             },
             .union_of => |variants| {
-                for (variants, 0..) |v, i| {
-                    if (i > 0) try writer.writeAll(" | ");
+                // `T?` sugar, for a 2-union ending in `:nil`
+                if (variants.len == 2 and variants[1].kind == .atom and
+                    std.mem.eql(u8, atomName(variants[1].kind.atom), "nil"))
+                {
+                    try variants[0].printAt(writer, null);
+                    try writer.writeByte('?');
+                } else for (variants, 0..) |v, i| {
+                    if (i > 0) try writer.writeByte('|');
                     try v.printAt(writer, null);
                 }
             },
@@ -160,11 +168,13 @@ pub const TypeExpr = struct {
                 try writer.writeAll("fn(");
                 for (f.params, 0..) |p, i| {
                     if (i > 0) try writer.writeAll(", ");
-                    try writer.writeAll(p.name);
-                    if (p.type_name) |t| {
-                        try writer.writeAll(": ");
-                        try t.printAt(writer, null);
+                    if (p.name.len > 0) {
+                        try writer.writeAll(p.name);
+                        if (p.type_name != null) try writer.writeByte(':');
                     }
+
+                    if (p.type_name) |t| try t.printAt(writer, null);
+                    if (p.variadic) try writer.writeAll("...");
                 }
                 try writer.writeByte(')');
                 if (f.return_type) |ret| {
@@ -189,10 +199,16 @@ pub const TypeExpr = struct {
     }
 };
 
-pub fn allocTypeExpr(allocator: std.mem.Allocator, span: Span, kind: TypeExpr.Kind) !*TypeExpr {
+pub fn allocTypeExpr(allocator: std.mem.Allocator, span: Span, kind: TypeExpr.Kind) std.mem.Allocator.Error!*TypeExpr {
     const te = try allocator.create(TypeExpr);
     te.* = .{ .span = span, .kind = kind };
     return te;
+}
+
+/// atom payload without a leading colon:
+/// `:nil` and `nil` both give `nil`
+pub fn atomName(name: []const u8) []const u8 {
+    return if (name.len > 0 and name[0] == ':') name[1..] else name;
 }
 
 pub const FnParam = struct {

@@ -94,95 +94,92 @@ pub const TypeInfo = struct {
         };
     }
 
-    /// alloc version of typeName, formats unions as well
-    pub fn formatType(self: TypeInfo, alloc: std.mem.Allocator) ![]const u8 {
-        return switch (self.tag) {
-            .never => try alloc.dupe(u8, "never"),
-            .type_var => |n| try alloc.dupe(u8, n),
-            .table => |tbl| blk: {
-                // `{ name: string, age: num }` when field types are known
-                if (tbl.fields) |fields| {
-                    var buf = try std.ArrayList(u8).initCapacity(alloc, 64);
-                    errdefer buf.deinit(alloc);
-                    try buf.append(alloc, '{');
-                    for (fields, 0..) |f, i| {
-                        if (i > 0) try buf.appendSlice(alloc, ", ");
-                        try buf.appendSlice(alloc, f.name);
-                        try buf.appendSlice(alloc, ": ");
-                        const ff = try f.field_type.formatType(alloc);
-                        defer alloc.free(ff);
-                        try buf.appendSlice(alloc, ff);
-                    }
-                    try buf.append(alloc, '}');
-                    break :blk try buf.toOwnedSlice(alloc);
-                }
-                var buf = try std.ArrayList(u8).initCapacity(alloc, 64);
-                errdefer buf.deinit(alloc);
-                try buf.appendSlice(alloc, "table<");
-                if (tbl.key) |k| {
-                    const kf = try k.*.formatType(alloc);
-                    defer alloc.free(kf);
-                    try buf.appendSlice(alloc, kf);
-                    try buf.appendSlice(alloc, ", ");
-                }
-                const vf = try tbl.value.*.formatType(alloc);
-                defer alloc.free(vf);
-                try buf.appendSlice(alloc, vf);
-                try buf.append(alloc, '>');
-                break :blk try buf.toOwnedSlice(alloc);
+    /// render it via TypeExpr printer: build syntax form,
+    /// print it, drop transient tree (names borrow self, like eval)
+    pub fn formatType(self: TypeInfo, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+        var buf = std.Io.Writer.Allocating.init(alloc);
+        errdefer buf.deinit();
+        const te = try toTypeExpr(alloc, self);
+        // the allocating writer only fails on oom; printAt is generic
+        // over writers so its error set is wider than what happens here
+        te.printAt(&buf.writer, null) catch |err| {
+            if (err != error.OutOfMemory) unreachable;
+            return error.OutOfMemory;
+        };
+        return try buf.toOwnedSlice();
+    }
+
+    const empty_span: ast.Span = .{ .start = 0, .end = 0, .line = 0, .column = 0 };
+
+    fn namedExpr(alloc: std.mem.Allocator, name: []const u8) !*ast.TypeExpr {
+        return try ast.allocTypeExpr(alloc, empty_span, .{ .named = name });
+    }
+
+    /// semantic TypeInfo back into syntax form for printing; mirrors
+    /// evalTypeExpr in reverse, names borrow self
+    pub fn toTypeExpr(alloc: std.mem.Allocator, ti: TypeInfo) std.mem.Allocator.Error!*ast.TypeExpr {
+        return switch (ti.tag) {
+            .bool => try namedExpr(alloc, "bool"),
+            .number => try namedExpr(alloc, "number"),
+            .string => try namedExpr(alloc, "string"),
+            .any => try namedExpr(alloc, "any"),
+            .never => try namedExpr(alloc, "never"),
+            .type_var => |n| try namedExpr(alloc, n),
+            .struct_type => |n| try namedExpr(alloc, n),
+            // empty atom payload is the "any atom" sentinel
+            .atom => |s| if (s.len == 0) try namedExpr(alloc, "atom") else try ast.allocTypeExpr(alloc, empty_span, .{ .atom = atomPayload(s) }),
+            // empty tuple is the "any tuple" sentinel
+            .tuple => |items| if (items.len == 0) try namedExpr(alloc, "tuple") else blk: {
+                const owned = try alloc.alloc(*ast.TypeExpr, items.len);
+                for (items, owned) |item, *dst| dst.* = try toTypeExpr(alloc, item);
+                break :blk try ast.allocTypeExpr(alloc, empty_span, .{ .tuple = owned });
             },
             .@"union" => |variants| blk: {
-                var buf = try std.ArrayList(u8).initCapacity(alloc, 64);
-                errdefer buf.deinit(alloc);
-                for (variants, 0..) |v, i| {
-                    if (i > 0) try buf.appendSlice(alloc, " | ");
-                    const is_tagged = v.types.len >= 2 and v.types[0].tag == .atom;
-                    if (is_tagged) try buf.append(alloc, '(');
-                    for (v.types, 0..) |vt, j| {
-                        if (j > 0) try buf.appendSlice(alloc, if (is_tagged) ", " else " ");
-                        const formatted = try vt.formatType(alloc);
-                        defer alloc.free(formatted);
-                        try buf.appendSlice(alloc, formatted);
-                    }
-                    if (is_tagged) try buf.append(alloc, ')');
+                const owned = try alloc.alloc(*ast.TypeExpr, variants.len);
+                for (variants, owned) |v, *dst| {
+                    const inner = if (v.types.len == 1) try toTypeExpr(alloc, v.types[0]) else blk2: {
+                        const items = try alloc.alloc(*ast.TypeExpr, v.types.len);
+                        for (v.types, items) |vt, *d| d.* = try toTypeExpr(alloc, vt);
+                        break :blk2 try ast.allocTypeExpr(alloc, empty_span, .{ .tuple = items });
+                    };
+                    dst.* = inner;
                 }
-                break :blk try buf.toOwnedSlice(alloc);
+                break :blk try ast.allocTypeExpr(alloc, empty_span, .{ .union_of = owned });
             },
-            .tuple => |items| blk: {
-                if (items.len == 0) break :blk try alloc.dupe(u8, "tuple");
-                var buf = try std.ArrayList(u8).initCapacity(alloc, 64);
-                errdefer buf.deinit(alloc);
-                try buf.append(alloc, '(');
-                for (items, 0..) |item, i| {
-                    if (i > 0) try buf.appendSlice(alloc, ", ");
-                    const formatted = try item.formatType(alloc);
-                    defer alloc.free(formatted);
-                    try buf.appendSlice(alloc, formatted);
+            .table => |tbl| blk: {
+                // known fields render as records, same precedence as before
+                if (tbl.fields) |fields| {
+                    const owned = try alloc.alloc(ast.RecordField, fields.len);
+                    for (fields, owned) |f, *dst| dst.* = .{
+                        .name = f.name,
+                        .type_expr = try toTypeExpr(alloc, f.field_type),
+                    };
+                    break :blk try ast.allocTypeExpr(alloc, empty_span, .{ .record = owned });
                 }
-                try buf.append(alloc, ')');
-                break :blk try buf.toOwnedSlice(alloc);
+                // bare `table` stays bare
+                if (tbl.key == null and tbl.value.tag == .any) break :blk try namedExpr(alloc, "table");
+                var params = try std.ArrayList(*ast.TypeExpr).initCapacity(alloc, 2);
+                if (tbl.key) |k| try params.append(alloc, try toTypeExpr(alloc, k.*));
+                try params.append(alloc, try toTypeExpr(alloc, tbl.value.*));
+                break :blk try ast.allocTypeExpr(alloc, empty_span, .{
+                    .parameterized = .{ .name = "table", .params = try params.toOwnedSlice(alloc) },
+                });
             },
             .function => |sig| blk: {
-                var buf = try std.ArrayList(u8).initCapacity(alloc, 64);
-                errdefer buf.deinit(alloc);
-                try buf.appendSlice(alloc, "fn(");
-                for (sig.params, 0..) |param, i| {
-                    if (i > 0) try buf.appendSlice(alloc, ", ");
-                    if (i < sig.param_names.len and sig.param_names[i].len > 0) {
-                        try buf.appendSlice(alloc, sig.param_names[i]);
-                        try buf.appendSlice(alloc, ": ");
-                    }
-                    const formatted = try param.formatType(alloc);
-                    defer alloc.free(formatted);
-                    try buf.appendSlice(alloc, formatted);
+                const params = try alloc.alloc(ast.FnParam, sig.params.len);
+                for (sig.params, 0..) |p, i| {
+                    const name = if (i < sig.param_names.len) sig.param_names[i] else "";
+                    params[i] = .{
+                        .name = name,
+                        .name_span = empty_span,
+                        .type_name = try toTypeExpr(alloc, p),
+                    };
                 }
-                try buf.appendSlice(alloc, ") -> ");
-                const ret = try sig.return_type.formatType(alloc);
-                defer alloc.free(ret);
-                try buf.appendSlice(alloc, ret);
-                break :blk try buf.toOwnedSlice(alloc);
+                const ret = try toTypeExpr(alloc, sig.return_type);
+                break :blk try ast.allocTypeExpr(alloc, empty_span, .{
+                    .function = .{ .params = params, .return_type = ret },
+                });
             },
-            else => try typeName(self, alloc),
         };
     }
 };
