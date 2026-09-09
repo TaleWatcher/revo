@@ -249,7 +249,7 @@ async def test_hover(client: LanguageClient):
     assert result is not None, "hover is None"
     contents = result.contents
     assert contents is not None
-    assert "int" in contents.value, "expected type"
+    assert "number" in contents.value, "expected canonical type"
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -917,7 +917,7 @@ async def test_inlay_hints(client: LanguageClient):
     found_x = [h for h in result if h.position.line == 0]
     assert len(found_x) >= 1, f"expected hint for x, got hints: {result}"
     hint = found_x[0]
-    assert "int" in hint.label, f"expected type in label, got {hint.label}"
+    assert "number" in hint.label, f"expected canonical type in label, got {hint.label}"
     assert hint.kind == 1  # InlayHintKind.Type = 1
 
 
@@ -1076,8 +1076,11 @@ async def test_import_hover_module_name(client: LanguageClient):
         assert contents is not None
         assert "module" in contents.value, f"expected 'module' in hover, got: {
             contents.value}"
-        assert "fn hi(a: int, b: int) -> int" in contents.value, (
+        assert "fn hi(a: number, b: number) -> number" in contents.value, (
             f"expected fn signature in hover, got: {contents.value}"
+        )
+        assert contents.value.count("fn hi(") == 1, (
+            f"expected no duplicate members, got: {contents.value}"
         )
         assert "const CT: int = 5" in contents.value, (
             f"expected const export in hover, got: {contents.value}"

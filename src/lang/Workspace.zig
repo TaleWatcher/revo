@@ -1489,17 +1489,20 @@ fn symbolsFromDep(self: *Workspace, alloc: std.mem.Allocator, dep_id: FileId) ![
     defer dep_analysis.deinit(alloc);
 
     const src = dep_analysis.symbols;
-    var out = try alloc.alloc(Symbol, src.len);
+    var out = try std.ArrayList(Symbol).initCapacity(alloc, src.len);
 
-    for (src, 0..) |s, i| {
-        out[i] = .{
+    // params resolve for hover/definition but are not module members;
+    // without this they render their definition line as phantom members
+    for (src) |s| {
+        if (s.kind == .param) continue;
+        try out.append(alloc, .{
             .name = try alloc.dupe(u8, s.name),
             .kind = s.kind,
             .range = s.range,
             .type_name = if (s.type_name) |ti| try types.clone(ti, alloc) else null,
-        };
+        });
     }
-    return out;
+    return out.toOwnedSlice(alloc);
 }
 
 /// TODO: botch. kill commit after e6f877ea when structural tables exist
