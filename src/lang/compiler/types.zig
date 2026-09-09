@@ -2437,12 +2437,14 @@ test "stdlib sigs: module result flows through match" {
 }
 
 test "stdlib sigs: local binding shadows stdlib module" {
-    // `fs` here is a local table, not the module: no stdlib sig is
-    // applied (no static error) and the missing field fails at runtime
-    try t.expectRuntimeError(
+    // `fs` here is a local table, not the module
+    // no stdlib sig is applied, and the missing field fails at compile time
+    // (it can never work, so no point waiting for runtime)
+    // so this is EXACTLY what we want. it gets erased
+    try t.expectCompileError(
         \\ let fs = {}
         \\ fs.exists?("/tmp")
-    , .NotAFunction);
+    , .ParseError);
 }
 
 test "stdlib sigs: try unwraps tagged tuples" {

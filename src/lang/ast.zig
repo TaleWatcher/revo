@@ -116,6 +116,11 @@ pub const TypeExpr = struct {
         tuple: []const *TypeExpr,
         union_of: []const *TypeExpr,
         record: []const RecordField,
+        /// qualified module type: `a.T` names alias T from module a
+        qualified: struct {
+            module: []const u8,
+            name: []const u8,
+        },
         function: struct {
             params: []const FnParam,
             return_type: ?*TypeExpr,
@@ -153,6 +158,11 @@ pub const TypeExpr = struct {
                     if (i > 0) try writer.writeByte('|');
                     try v.printAt(writer, null);
                 }
+            },
+            .qualified => |q| {
+                try writer.writeAll(q.module);
+                try writer.writeByte('.');
+                try writer.writeAll(q.name);
             },
             .record => |fields| {
                 try writer.writeByte('{');
@@ -1016,6 +1026,12 @@ fn walkTypeExprWithVisitor(comptime Visitor: type, visitor: *Visitor, te: *const
         .named => |name| {
             var temp: Node = .{ .span = te.span, .expr = .{ .ident = name } };
             visitor.visit(&temp);
+        },
+        .qualified => |q| {
+            var mod_temp: Node = .{ .span = te.span, .expr = .{ .ident = q.module } };
+            visitor.visit(&mod_temp);
+            var name_temp: Node = .{ .span = te.span, .expr = .{ .ident = q.name } };
+            visitor.visit(&name_temp);
         },
         .atom => {},
         .tuple => |items| for (items) |item| walkTypeExprWithVisitor(Visitor, visitor, item),

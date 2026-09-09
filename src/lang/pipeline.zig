@@ -397,70 +397,6 @@ fn extractPubImportsOneLevel(
     }
 }
 
-/// extract pub fn signatures from a module AST, qualified with prefix
-pub fn extractPubFnSigs(
-    node: *Node,
-    prefix: []const u8,
-    alloc: std.mem.Allocator,
-    out: *std.StringHashMap(std.ArrayList(ImportFnMeta)),
-) !void {
-    switch (node.expr) {
-        .block => |items| {
-            for (items) |item| try extractPubFnSigs(item, prefix, alloc, out);
-        },
-        .decl => |d| {
-            if (d.pub_) {
-                if (d.kind == .declare_decl) {
-                    if (d.inner.expr == .type_alias) {
-                        const t = d.inner.expr.type_alias;
-                        switch (t.type_expr.kind) {
-                            .function => |f| {
-                                var params = try std.ArrayList(ImportParam).initCapacity(alloc, f.params.len);
-                                for (f.params) |p| {
-                                    params.appendAssumeCapacity(.{ .name = p.name, .type_expr = p.type_name });
-                                }
-                                var entry = out.getPtr(prefix) orelse blk: {
-                                    const empty = try std.ArrayList(ImportFnMeta).initCapacity(alloc, 0);
-                                    try out.put(prefix, empty);
-                                    break :blk out.getPtr(prefix).?;
-                                };
-                                try entry.append(alloc, .{
-                                    .name = t.name,
-                                    .params = try params.toOwnedSlice(alloc),
-                                    .return_type_expr = f.return_type,
-                                });
-                            },
-                            else => {},
-                        }
-                    }
-                } else if (d.inner.expr == .binding) {
-                    const b = d.inner.expr.binding;
-                    if (b.value.expr == .fn_expr and b.target.expr == .ident) {
-                        const fn_expr = b.value.expr.fn_expr;
-                        const fn_name = b.target.expr.ident;
-                        var params = try std.ArrayList(ImportParam).initCapacity(alloc, fn_expr.params.len);
-                        for (fn_expr.params) |p| {
-                            params.appendAssumeCapacity(.{ .name = p.name, .type_expr = p.type_name });
-                        }
-                        var entry = out.getPtr(prefix) orelse blk: {
-                            const empty = try std.ArrayList(ImportFnMeta).initCapacity(alloc, 0);
-                            try out.put(prefix, empty);
-                            break :blk out.getPtr(prefix).?;
-                        };
-                        try entry.append(alloc, .{
-                            .name = fn_name,
-                            .params = try params.toOwnedSlice(alloc),
-                            .return_type_expr = fn_expr.return_type,
-                        });
-                    }
-                }
-            }
-            try extractPubFnSigs(d.inner, prefix, alloc, out);
-        },
-        else => {},
-    }
-}
-
 pub fn build(vm: *VM, source: Source, opts: BuildOptions) !BuildResult {
     var arena = std.heap.ArenaAllocator.init(vm.runtime.alloc);
     defer arena.deinit();
@@ -508,7 +444,7 @@ pub fn build(vm: *VM, source: Source, opts: BuildOptions) !BuildResult {
 
     const expanded = switch (expand_result) {
         .ok => |ok| ok,
-        .proc_err => |report| {
+        .proc_err, .macro_err => |report| {
             var copied = try report.copy(vm.runtime.diag_alloc);
             copied.source_name = source.name;
             copied.source = source.text;
@@ -646,20 +582,61 @@ pub const ExpandResult = Result(Expanded, ExpandError);
 pub const ExpandWithVmResult = union(enum) {
     ok: Expanded,
     proc_err: diagnostic.Report,
+    macro_err: diagnostic.Report,
 };
+
+/// a `!` call surviving all expansion passes.
+const UnexpandedMacro = struct {
+    name: []const u8,
+    span: ast.Span,
+};
+
+const UnexpandedVisitor = struct {
+    alloc: std.mem.Allocator,
+    out: *std.ArrayList(UnexpandedMacro),
+
+    pub fn visit(self: *@This(), node: *const Node) void {
+        if (node.expr == .call) {
+            const callee = node.expr.call.callee;
+            switch (callee.expr) {
+                .ident => |n| if (std.mem.endsWith(u8, n, "!")) {
+                    self.out.append(self.alloc, .{ .name = n, .span = callee.span }) catch return;
+                },
+                .field => |f| if (std.mem.endsWith(u8, f.name, "!")) {
+                    //
+                    // qualified `a.hi!` for plain idents, bare name otherwise
+                    if (f.object.expr == .ident) {
+                        const qualified = std.fmt.allocPrint(
+                            self.alloc,
+                            "{s}.{s}",
+                            .{ f.object.expr.ident, f.name },
+                        ) catch return;
+                        self.out.append(self.alloc, .{ .name = qualified, .span = callee.span }) catch return;
+                    } else {
+                        self.out.append(self.alloc, .{ .name = f.name, .span = callee.span }) catch return;
+                    }
+                },
+                else => {},
+            }
+        }
+        ast.walkAST(UnexpandedVisitor, self, node);
+    }
+};
+
+/// unknown macros just liek pattern misses; both fail at runtime
+/// quasiquote pruned by the walk
+fn collectUnexpandedMacros(alloc: std.mem.Allocator, root: *const Node) ![]UnexpandedMacro {
+    var out = try std.ArrayList(UnexpandedMacro).initCapacity(alloc, 4);
+    errdefer out.deinit(alloc);
+
+    var visitor = UnexpandedVisitor{ .alloc = alloc, .out = &out };
+    visitor.visit(root);
+
+    return out.toOwnedSlice(alloc);
+}
+
 pub const LowerResult = Result(Artifact, compiler.LowerFailure);
 pub const BuildResult = Result(Artifact, Error);
-
-pub const ImportParam = struct {
-    name: []const u8,
-    type_expr: ?*ast.TypeExpr,
-};
-
-pub const ImportFnMeta = struct {
-    name: []const u8,
-    params: []const ImportParam,
-    return_type_expr: ?*ast.TypeExpr,
-};
 
 pub fn parse(allocator: std.mem.Allocator, source: Source, opts: ParseOptions) !ParseResult {
     if (!opts.include_default_macros) {
@@ -705,9 +682,43 @@ pub fn expandWithVmSource(
 ) !ExpandWithVmResult {
     const template_expanded = try expander.expandExpr(allocator, parsed.root);
     const proc_result = try proc.expandExprWithSource(vm, allocator, template_expanded, source_name, source);
-    if (proc_result.error_report) |report| return .{ .proc_err = report };
+
+    if (proc_result.error_report) |report|
+        return .{ .proc_err = report };
+
     const final = try expander.expandExpr(allocator, proc_result.root.?);
+    const missed = try collectUnexpandedMacros(allocator, final);
+
+    if (missed.len > 0) {
+        return .{ .macro_err = try macroReport(allocator, source_name, source, missed) };
+    }
     return .{ .ok = .{ .root = final } };
+}
+
+/// one unknown-macro error per surviving callsite
+fn macroReport(
+    allocator: std.mem.Allocator,
+    source_name: []const u8,
+    source: []const u8,
+    missed: []UnexpandedMacro,
+) !diagnostic.Report {
+    const fmt = "unknown macro `{s}`";
+    var parts = try std.ArrayList(diagnostic.Part).initCapacity(allocator, missed.len * 2);
+    errdefer parts.deinit(allocator);
+
+    for (missed) |m| {
+        const msg = try std.fmt.allocPrint(allocator, fmt, .{m.name});
+        try parts.append(allocator, .{ .@"error" = msg });
+        try parts.append(allocator, .{ .span = .{ .span = m.span, .role = .primary } });
+    }
+
+    const first = try std.fmt.allocPrint(allocator, fmt, .{missed[0].name});
+    return .{
+        .message = first,
+        .parts = try parts.toOwnedSlice(allocator),
+        .source_name = source_name,
+        .source = source,
+    };
 }
 
 pub fn lower(

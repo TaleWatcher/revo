@@ -196,3 +196,10 @@ pub fn inferFnType(
 pub fn resolveTypeAlias(self: *Compiler, name: []const u8) ?TypeInfo {
     return self.type_aliases.get(name);
 }
+
+/// cant do it
+/// no io dep in the compiler
+/// sema validates first anwyays so degraditn to any cant false-error
+pub fn resolveImportAlias(_: *Compiler, _: []const u8, _: []const u8) ?TypeInfo {
+    return null;
+}

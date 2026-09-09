@@ -36,11 +36,10 @@ pub fn analyze(
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    var checker = try SemanticChecker.init(arena_alloc, source_name, source, known_globals, type_map, type_annotations, docs);
+    var checker = try SemanticChecker.init(arena_alloc, source_name, source, known_globals, type_map, type_annotations, docs, module_resolver);
     defer checker.deinit();
 
     try checker.collectPredeclared(root);
-    try checker.walkImports(root, module_resolver);
     _ = try checker.analyzeNode(root);
     if (type_map) |tm| {
         try reparentMap([]const u8, std.StringHashMap(types_mod.TypeInfo), tm, alloc);
@@ -146,8 +145,9 @@ const SemanticChecker = struct {
     current_type_params: []const []const u8 = &.{},
     /// > 0 while inside a fn body; gates type_map/docs exports
     fn_nesting: usize = 0,
-    import_fn_sigs: std.StringHashMap(std.ArrayList(lang.pipeline.ImportFnMeta)),
-    dep_asts: std.ArrayList(*const ast.Node),
+    resolver: ModuleResolver,
+    /// module name -> pub type aliases, for `a.T` annotations
+    import_aliases: std.StringHashMap(std.StringHashMap(types_mod.TypeInfo)),
 
     fn init(
         alloc: std.mem.Allocator,
@@ -157,6 +157,7 @@ const SemanticChecker = struct {
         type_map: ?*std.StringHashMap(types_mod.TypeInfo),
         type_annotations: ?*std.AutoHashMap(*const ast.Node, types_mod.TypeInfo),
         docs: ?*std.StringHashMap([]const u8),
+        resolver: ModuleResolver,
     ) !SemanticChecker {
         var checker: SemanticChecker = .{
             .alloc = alloc,
@@ -178,8 +179,8 @@ const SemanticChecker = struct {
             .escaped = .init(alloc),
             .known_globals = .init(alloc),
             .shadowed_globals = .init(alloc),
-            .import_fn_sigs = .init(alloc),
-            .dep_asts = .empty,
+            .resolver = resolver,
+            .import_aliases = .init(alloc),
         };
 
         try checker.pushScope();
@@ -209,8 +210,6 @@ const SemanticChecker = struct {
     fn deinit(self: *SemanticChecker) void {
         for (self.scopes.items) |*scope| scope.deinit();
         self.scopes.deinit(self.alloc);
-        self.import_fn_sigs.deinit();
-        self.dep_asts.deinit(self.alloc);
         self.predeclared.deinit(self.alloc);
     }
 
@@ -239,31 +238,15 @@ const SemanticChecker = struct {
         }
     }
 
-    fn walkImports(self: *SemanticChecker, node: *const ast.Node, resolver: ModuleResolver) !void {
-        switch (node.expr) {
-            .block => |items| {
-                for (items) |item| try self.walkImports(item, resolver);
-            },
-            .import_stmt => |stmt| {
-                try self.resolveImport(stmt, resolver);
-            },
-            .decl => |d| try self.walkImports(d.inner, resolver),
-            .binding => |b| try self.walkImports(b.value, resolver),
-            else => {},
-        }
-    }
+    /// dep file ast for an import path, null when unresolvable
+    ///
+    /// import arm builds a record type from it on demand
+    fn resolveDepAst(self: *SemanticChecker, path: []const u8) ?*const ast.Node {
+        const source_alloc = self.resolver.resolve(path, self.alloc) orelse return null;
+        defer self.alloc.free(source_alloc);
 
-    fn resolveImport(self: *SemanticChecker, stmt: anytype, resolver: ModuleResolver) !void {
-        if (self.import_fn_sigs.contains(stmt.name)) return;
-
-        const source_alloc = resolver.resolve(stmt.path, self.alloc) orelse return;
-        const source = try self.alloc.dupe(u8, source_alloc);
-        self.alloc.free(source_alloc);
-
-        const module_ast = lang.parseSource(self.alloc, source) catch return;
-        try self.dep_asts.append(self.alloc, module_ast);
-
-        lang.pipeline.extractPubFnSigs(module_ast, stmt.name, self.alloc, &self.import_fn_sigs) catch return;
+        const source = self.alloc.dupe(u8, source_alloc) catch return null;
+        return lang.parseSource(self.alloc, source) catch return null;
     }
 
     fn finishReport(self: *SemanticChecker) !diagnostic.Report {
@@ -355,6 +338,11 @@ const SemanticChecker = struct {
 
     pub fn resolveTypeAlias(self: *SemanticChecker, name: []const u8) ?types_mod.TypeInfo {
         return (self.type_aliases.get(name) orelse return null).info;
+    }
+
+    pub fn resolveImportAlias(self: *SemanticChecker, module: []const u8, name: []const u8) ?types_mod.TypeInfo {
+        const aliases = self.import_aliases.get(module) orelse return null;
+        return aliases.get(name);
     }
 
     pub fn inferCallReturnType(
@@ -461,6 +449,39 @@ const SemanticChecker = struct {
         }
     }
 
+    /// `a.T` in type position: the module must be a known import carrying
+    /// the alias, otherwise the annotation cannot mean anything.
+    /// unresolvable modules stay silent (the dep may simply not be on
+    /// disk for tooling); evalTypeExpr already degrades those to any
+    fn checkQualifiedTypes(self: *SemanticChecker, te: *const ast.TypeExpr) !void {
+        switch (te.kind) {
+            .qualified => |q| {
+                if (self.import_aliases.get(q.module)) |aliases| {
+                    if (aliases.get(q.name) == null) {
+                        const msg = try std.fmt.allocPrint(self.alloc, "unknown type `{s}` for module `{s}`", .{ q.name, q.module });
+                        try self.appendError(msg, te.span, "unknown type");
+                    }
+                }
+            },
+            .tuple => |items| for (items) |item| try self.checkQualifiedTypes(item),
+            .union_of => |variants| for (variants) |v| try self.checkQualifiedTypes(v),
+            .record => |fields| for (fields) |f| try self.checkQualifiedTypes(f.type_expr),
+            .function => |f| {
+                for (f.params) |p| if (p.type_name) |t| try self.checkQualifiedTypes(t);
+                if (f.return_type) |ret| try self.checkQualifiedTypes(ret);
+            },
+            .parameterized => |p| for (p.params) |param| try self.checkQualifiedTypes(param),
+            .error_union => |inner| try self.checkQualifiedTypes(inner),
+            .named, .atom => {},
+        }
+    }
+
+    /// user annotation: validate qualified names, then evaluate
+    fn evalCheckedTypeExpr(self: *SemanticChecker, te: *const ast.TypeExpr) !types_mod.TypeInfo {
+        try self.checkQualifiedTypes(te);
+        return try type_parser.evalTypeExpr(self, te);
+    }
+
     pub fn inferFieldType(self: *SemanticChecker, object: *const ast.Node, name: []const u8) types_mod.TypeInfo {
         const object_type = types_mod.inferExprType(self, object);
         // user-defined table fields shadow stdlib methods: literal shapes
@@ -502,32 +523,6 @@ const SemanticChecker = struct {
             const struct_name = object_type.tag.struct_type;
             const layout = self.struct_layouts.get(struct_name) orelse return .{ .tag = .any };
             for (layout) |f| if (std.mem.eql(u8, f.name, name)) return if (f.field_type.tag != .any) f.field_type else if (f.type_name) |tn| types_mod.resolveTypeName(self, tn) else types_mod.TypeInfo{ .tag = .any };
-        }
-        // import function signature lookup
-        if (object.expr == .ident) {
-            const obj_name = object.expr.ident;
-            if (self.import_fn_sigs.get(obj_name)) |fn_list| {
-                for (fn_list.items) |meta| {
-                    if (!std.mem.eql(u8, meta.name, name)) continue;
-                    var param_types = std.ArrayList(types_mod.TypeInfo).initCapacity(self.alloc, meta.params.len) catch return .{ .tag = .any };
-                    var param_names = std.ArrayList([]const u8).initCapacity(self.alloc, meta.params.len) catch return .{ .tag = .any };
-                    for (meta.params) |p| {
-                        param_names.appendAssumeCapacity(p.name);
-                        const pt = if (p.type_expr) |te| type_parser.evalTypeExpr(self, te) catch types_mod.TypeInfo{ .tag = .any } else types_mod.TypeInfo{ .tag = .any };
-                        param_types.appendAssumeCapacity(pt);
-                    }
-                    const ret = if (meta.return_type_expr) |rt| type_parser.evalTypeExpr(self, rt) catch types_mod.TypeInfo{ .tag = .any } else types_mod.TypeInfo{ .tag = .any };
-                    const names_slice = param_names.toOwnedSlice(self.alloc) catch return .{ .tag = .any };
-                    const types_slice = param_types.toOwnedSlice(self.alloc) catch return .{ .tag = .any };
-                    const sig_ptr = types_mod.newSignature(self.alloc, .{
-                        .param_names = names_slice,
-                        .params = types_slice,
-                        .return_type = ret,
-                        .required_count = types_slice.len,
-                    }) catch return .{ .tag = .any };
-                    return .{ .tag = .{ .function = sig_ptr } };
-                }
-            }
         }
         // stdlib module function lookup: fs.exists?, file.read, time.now.
         // only globals are modules; a local binding shadows the module
@@ -586,15 +581,23 @@ const SemanticChecker = struct {
         var param_names = try std.ArrayList([]const u8).initCapacity(self.alloc, fn_expr.params.len);
         var param_types = try std.ArrayList(types_mod.TypeInfo).initCapacity(self.alloc, fn_expr.params.len);
         var required_count: usize = 0;
+
         for (fn_expr.params) |p| {
             try param_names.append(self.alloc, p.name);
-            try param_types.append(self.alloc, if (p.type_name) |tn| try type_parser.evalTypeExpr(self, tn) else types_mod.TypeInfo{ .tag = .any });
+            const t = if (p.type_name) |tn|
+                try self.evalCheckedTypeExpr(tn)
+            else
+                types_mod.TypeInfo{ .tag = .any };
+
+            try param_types.append(self.alloc, t);
             if (!p.optional and p.default_value == null) required_count += 1;
         }
+
         const params_slice = try param_types.toOwnedSlice(self.alloc);
         const names_slice = try param_names.toOwnedSlice(self.alloc);
-        const ret = if (fn_expr.return_type) |rt| try type_parser.evalTypeExpr(self, rt) else types_mod.TypeInfo{ .tag = .any };
+        const ret = if (fn_expr.return_type) |rt| try self.evalCheckedTypeExpr(rt) else types_mod.TypeInfo{ .tag = .any };
         const doc: ?[]const u8 = if (@hasField(@TypeOf(fn_expr), "doc")) fn_expr.doc else null;
+
         return try types_mod.newSignature(self.alloc, .{
             .param_names = names_slice,
             .params = params_slice,
@@ -840,49 +843,27 @@ const SemanticChecker = struct {
                 break :blk types_mod.inferExprType(self, node);
             },
             .import_stmt => |stmt| blk: {
-                try self.declare(stmt.name, .{ .tag = .any }, null);
-                // populate table_field_map from import_fn_sigs so const
-                // bindings like `const rl = import 'raylib.so'` carry typed fields
-                if (self.import_fn_sigs.get(stmt.name)) |fn_list| {
-                    var fields = std.StringHashMap(types_mod.TypeInfo).init(self.alloc);
-                    for (fn_list.items) |meta| {
-                        var param_types =
-                            std.ArrayList(types_mod.TypeInfo)
-                                .initCapacity(self.alloc, meta.params.len) catch
-                                break :blk .{ .tag = .any };
+                // the dep interface becomes the binding's record type, so
+                // member access, calls, and completions flow through the
+                // regular table paths; unresolvable deps stay untyped
+                if (self.resolveDepAst(stmt.path)) |dep| {
+                    const items: []const *ast.Node = switch (dep.expr) {
+                        .block => |exprs| exprs,
+                        else => &[_]*ast.Node{@constCast(dep)},
+                    };
 
-                        var param_names =
-                            std.ArrayList([]const u8)
-                                .initCapacity(self.alloc, meta.params.len) catch
-                                break :blk .{ .tag = .any };
+                    if (type_parser.moduleInterface(self.alloc, items)) |iface| {
+                        var aliases = std.StringHashMap(types_mod.TypeInfo).init(self.alloc);
+                        for (iface.aliases) |a| try aliases.put(a.name, a.info);
+                        try self.import_aliases.put(stmt.name, aliases);
 
-                        for (meta.params) |p| {
-                            param_names.appendAssumeCapacity(p.name);
-                            const pt = if (p.type_expr) |te| type_parser.evalTypeExpr(self, te) catch types_mod.TypeInfo{ .tag = .any } else types_mod.TypeInfo{ .tag = .any };
-                            param_types.appendAssumeCapacity(pt);
+                        if (iface.record) |record| {
+                            try self.declare(stmt.name, record, null);
+                            break :blk record;
                         }
-
-                        const ret = if (meta.return_type_expr) |rt|
-                            type_parser.evalTypeExpr(self, rt) catch types_mod.TypeInfo{ .tag = .any }
-                        else
-                            types_mod.TypeInfo{ .tag = .any };
-
-                        const names_slice = param_names
-                            .toOwnedSlice(self.alloc) catch break :blk .{ .tag = .any };
-                        const types_slice = param_types
-                            .toOwnedSlice(self.alloc) catch break :blk .{ .tag = .any };
-
-                        const sig_ptr = types_mod.newSignature(self.alloc, .{
-                            .param_names = names_slice,
-                            .params = types_slice,
-                            .return_type = ret,
-                            .required_count = types_slice.len,
-                        }) catch break :blk .{ .tag = .any };
-
-                        try fields.put(meta.name, .{ .tag = .{ .function = sig_ptr } });
-                    }
-                    try self.table_field_map.put(stmt.name, fields);
+                    } else |_| {}
                 }
+                try self.declare(stmt.name, .{ .tag = .any }, null);
                 break :blk .{ .tag = .any };
             },
             .macro_expr => |m| blk: {
@@ -941,7 +922,7 @@ const SemanticChecker = struct {
             try self.appendError(msg, alias.type_expr.span, "duplicate declare");
             return .{ .tag = .any };
         }
-        const t = type_parser.evalTypeExpr(self, alias.type_expr) catch types_mod.TypeInfo{ .tag = .any };
+        const t = self.evalCheckedTypeExpr(alias.type_expr) catch types_mod.TypeInfo{ .tag = .any };
         try self.declare(alias.name, t, doc orelse alias.doc);
         // also usable in type positions: `const x: MAX_ITEMS = 5`
         try self.type_aliases.put(alias.name, .{ .info = t, .doc = doc orelse alias.doc });
@@ -955,7 +936,7 @@ const SemanticChecker = struct {
 
     fn analyzeTypeAlias(self: *SemanticChecker, alias: anytype, doc: ?[]const u8, span: ast.Span) !types_mod.TypeInfo {
         _ = span;
-        const t = type_parser.evalTypeExpr(self, alias.type_expr) catch types_mod.TypeInfo{ .tag = .any };
+        const t = self.evalCheckedTypeExpr(alias.type_expr) catch types_mod.TypeInfo{ .tag = .any };
         try self.type_aliases.put(alias.name, .{ .info = t, .doc = doc orelse alias.doc });
         return .{ .tag = .any };
     }
@@ -983,7 +964,7 @@ const SemanticChecker = struct {
                 try seen.put(field.name, {});
                 if (field.default_value) |_| try optional.put(field.name, {});
                 const field_type: types_mod.TypeInfo = if (field.type_name) |tn|
-                    try type_parser.evalTypeExpr(self, tn)
+                    try self.evalCheckedTypeExpr(tn)
                 else if (field.default_value) |dflt|
                     types_mod.inferExprType(self, dflt)
                 else
@@ -1055,7 +1036,7 @@ const SemanticChecker = struct {
             const fn_type: types_mod.TypeInfo = .{ .tag = .{ .function = sig } };
             if (binding.type_name) |type_expr| {
                 try self.typed_names.put(name, {});
-                const expected = try type_parser.evalTypeExpr(self, type_expr);
+                const expected = try self.evalCheckedTypeExpr(type_expr);
                 if (!types_mod.canCoerce(fn_type, expected)) {
                     try self.appendTypeMismatch(
                         binding.target.span,
@@ -1106,7 +1087,7 @@ const SemanticChecker = struct {
             const table_type = types_mod.inferExprType(self, binding.value);
             if (binding.type_name) |type_expr| {
                 try self.typed_names.put(name, {});
-                const expected = try type_parser.evalTypeExpr(self, type_expr);
+                const expected = try self.evalCheckedTypeExpr(type_expr);
                 if (!types_mod.canCoerce(table_type, expected)) {
                     try self.appendTypeMismatch(
                         binding.target.span,
@@ -1132,7 +1113,7 @@ const SemanticChecker = struct {
         const value_type = try self.analyzeNode(binding.value);
         if (binding.type_name) |type_expr| {
             try self.typed_names.put(name, {});
-            const expected = try type_parser.evalTypeExpr(self, type_expr);
+            const expected = try self.evalCheckedTypeExpr(type_expr);
             if (!types_mod.canCoerce(value_type, expected)) {
                 try self.appendTypeMismatch(
                     binding.target.span,
@@ -1347,6 +1328,22 @@ const SemanticChecker = struct {
         }
         if (call.callee.expr == .field) {
             _ = try self.analyzeNode(call.callee.expr.field.object);
+            // ~ dot-call callees read the field first (`t.f()`)
+            // ~ colon-calls (`t:f()`) dispatch to methods
+            // ~ `!` callees are macro calls, handled by expansion reporting instead
+            // ~ a field that is also a stdlib method (`t.len()`) dispatches
+            //   at runtime, so only flag names that resolve to neither
+            if (!call.implicit_self and !std.mem.endsWith(u8, call.callee.expr.field.name, "!")) {
+                const f = call.callee.expr.field;
+                const obj_type = types_mod.inferExprType(self, f.object);
+                const dispatches = switch (obj_type.tag) {
+                    .string => findMethodByNameAndTarget(f.name, .string) != null,
+                    .tuple => findMethodByNameAndTarget(f.name, .tuple) != null,
+                    .table => findMethodByNameAndTarget(f.name, .table) != null,
+                    else => false,
+                };
+                if (!dispatches) try self.checkKnownField(f.object, f.name, call.callee.span);
+            }
         }
         const callee_type = types_mod.inferExprType(self, call.callee);
         // struct init validation

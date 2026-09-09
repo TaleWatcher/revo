@@ -188,6 +188,7 @@ pub const Compiler = struct {
     pub const inferIdentType = type_check.inferIdentType;
     pub const resolveTypeName = types.resolveTypeName;
     pub const resolveTypeAlias = type_check.resolveTypeAlias;
+    pub const resolveImportAlias = type_check.resolveImportAlias;
     pub const inferCallReturnType = type_check.inferCallReturnType;
     pub const inferFieldType = type_check.inferFieldType;
     pub const inferFnType = type_check.inferFnType;

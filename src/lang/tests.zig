@@ -2105,6 +2105,155 @@ test "imported module assignment is private to module cache" {
         \\ y
     );
 }
+
+test "imported module members work  and are typed" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "calc.rv",
+        .data =
+        \\ pub fn double(n: num) n * 2
+        \\ pub const version = 3
+        \\ const hidden = 99
+        ,
+    });
+
+    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(module_dir);
+
+    try t.topNumberInDir(module_dir,
+        \\ const m = import "./calc"
+        \\ m.double(21)
+    , 42);
+
+    try t.topNumberInDir(module_dir,
+        \\ const m = import "./calc"
+        \\ m.version
+    , 3);
+
+    try t.expectCompileErrorInDir(module_dir,
+        \\ const m = import "./calc"
+        \\ m.double("x")
+    );
+
+    try t.expectCompileErrorInDir(module_dir,
+        \\ const m = import "./calc"
+        \\ m.typo
+    );
+
+    // non-pub names are not runtime exports either
+    try t.expectCompileErrorInDir(module_dir,
+        \\ const m = import "./calc"
+        \\ m.hidden
+    );
+}
+
+test "imported proc macros expand, unknown ones error" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "macs.rv",
+        .data =
+        \\ pub proc answer!(iter) do
+        \\   {(:number, 42)}
+        \\ end
+        ,
+    });
+
+    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(module_dir);
+
+    try t.topNumberInDir(module_dir,
+        \\ const m = import "./macs"
+        \\ m.answer!()
+    , 42);
+
+    try t.expectExpandErrorInDir(module_dir,
+        \\ const m = import "./macs"
+        \\ m.nope!(1)
+    , "unknown macro `m.nope!`");
+}
+
+test "unknown macro calls are compile errors" {
+    // yes this happens sometimes and its REALLY unfun
+    try t.expectExpandError(
+        \\ nosuchmacro!(1)
+    , "unknown macro `nosuchmacro!`");
+}
+
+test "imported qualified types check values" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "shapes.rv",
+        .data =
+        \\ pub type T = (:ok, string)
+        \\ pub fn f() 10
+        \\ pub let v = 5
+        ,
+    });
+
+    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(module_dir);
+
+    try t.topNumberInDir(module_dir,
+        \\ import "shapes"
+        \\ let x: shapes.T = (:ok, "hi")
+        \\ 1
+    , 1);
+
+    try t.expectCompileErrorInDir(module_dir,
+        \\ import "shapes"
+        \\ let x: shapes.T = (:err, 5)
+    );
+
+    try t.expectCompileErrorInDir(module_dir,
+        \\ import "shapes"
+        \\ let x: shapes.U = (:ok, "hi")
+    );
+
+    try t.expectCompileErrorInDir(module_dir,
+        \\ import "shapes"
+        \\ type B = shapes.T
+        \\ let y: B = (:err, 5)
+    );
+
+    try t.topNumberInDir(module_dir,
+        \\ import "shapes"
+        \\ fn get() -> shapes.T (:ok, "hi")
+        \\ 1
+    , 1);
+}
+
+test "imported unknown member calls are errors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "calc.rv",
+        .data =
+        \\ pub fn double(n: num) n * 2
+        \\ pub const version = 3
+        ,
+    });
+
+    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
+    defer alloc.free(module_dir);
+
+    try t.expectCompileErrorInDir(module_dir,
+        \\ const m = import "./calc"
+        \\ m.typo()
+    );
+
+    // stdlib method dispatch still works on known-shape tables
+    try t.topNumberInDir(module_dir,
+        \\ const m = import "./calc"
+        \\ m.double(21)
+    , 42);
+}
 //
 // misc behaviour doc
 //
@@ -3288,10 +3437,12 @@ test "non-pub macro is not injected" {
         \\ import "./macros"
         \\ macros.visible!(99)
     , 99);
-    try t.expectRuntimeErrorInDir(module_dir,
+    // non-pub macros are not injected, so the call never expands:
+    // unknown macro is a compile error, not a runtime one
+    try t.expectExpandErrorInDir(module_dir,
         \\ import "./macros"
         \\ macros.hidden!(21)
-    , .NotAFunction);
+    , "unknown macro `macros.hidden!`");
 }
 
 test "cross-module proc macro injection works" {

@@ -218,6 +218,50 @@ pub fn expectCompileErrorInDir(module_dir: []const u8, source: []const u8) !void
     }
 }
 
+fn checkExpandError(vm: *revo.VM, result: lang.BuildResult, expected_message: []const u8) !void {
+    switch (result) {
+        .ok => |artifact| {
+            defer alloc.free(artifact.instructions);
+            defer alloc.free(artifact.spans);
+            return error.ExpectedCompileFailure;
+        },
+        .err => |failure| switch (failure) {
+            .expand => |diag| {
+                const msg = lang.diagnostic.firstError(diag.report).?;
+                try std.testing.expectEqualStrings(expected_message, msg);
+                vm.runtime.resetDiagArena();
+            },
+            else => return error.ExpectedExpandFailure,
+        },
+    }
+}
+
+pub fn expectExpandError(source: []const u8, expected_message: []const u8) !void {
+    var vm = try revo.VM.init(runtime());
+    defer vm.deinit();
+
+    const result = try lang.build(&vm, .{ .text = source }, .{
+        .install_debug_info = false,
+    });
+
+    try checkExpandError(&vm, result, expected_message);
+}
+
+pub fn expectExpandErrorInDir(module_dir: []const u8, source: []const u8, expected_message: []const u8) !void {
+    var vm = try revo.VM.init(runtime());
+    defer vm.deinit();
+    vm.module_dir = module_dir;
+
+    const source_name = try std.fs.path.join(alloc, &.{ module_dir, "<source>" });
+    defer alloc.free(source_name);
+
+    const result = try lang.build(&vm, .{ .name = source_name, .text = source }, .{
+        .install_debug_info = false,
+    });
+
+    try checkExpandError(&vm, result, expected_message);
+}
+
 pub fn expectCompileFailure(
     source: []const u8,
     expected_kind: lang.LowerErrorKind,
