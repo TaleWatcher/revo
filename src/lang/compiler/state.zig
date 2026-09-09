@@ -39,20 +39,11 @@ pub const FunctionState = struct {
     scope_starts: std.ArrayList(usize),
     type_hints: std.ArrayList(TypeHint),
     type_scope_starts: std.ArrayList(usize),
-    fn_signatures: std.StringHashMap(*FnSig),
+    fn_signatures: std.StringHashMap(*types.FunctionSignature),
     type_params: []const []const u8 = &.{},
     name_cache: std.StringHashMap(CachedSlot),
     type_hint_cache: std.StringHashMap(CachedSlot),
     cache_gen: u32 = 0,
-
-    pub const FnSig = struct {
-        param_names: []const []const u8,
-        param_types: []const types.TypeInfo,
-        required_count: usize,
-        type_params: []const []const u8 = &.{},
-        return_type: types.TypeInfo = .{ .tag = .any },
-        default_values: []const ?*ast.Node = &.{},
-    };
 
     pub fn init(alloc: std.mem.Allocator) !FunctionState {
         return .{
@@ -64,7 +55,7 @@ pub const FunctionState = struct {
             .scope_starts = try std.ArrayList(usize).initCapacity(alloc, 8),
             .type_hints = try std.ArrayList(TypeHint).initCapacity(alloc, 8),
             .type_scope_starts = try std.ArrayList(usize).initCapacity(alloc, 8),
-            .fn_signatures = std.StringHashMap(*FnSig).init(alloc),
+            .fn_signatures = std.StringHashMap(*types.FunctionSignature).init(alloc),
             .name_cache = std.StringHashMap(CachedSlot).init(alloc),
             .type_hint_cache = std.StringHashMap(CachedSlot).init(alloc),
         };
@@ -83,7 +74,7 @@ pub const FunctionState = struct {
 
         var it = self.fn_signatures.iterator();
         while (it.next()) |entry| {
-            alloc.free(entry.value_ptr.*.param_types);
+            alloc.free(entry.value_ptr.*.params);
             alloc.destroy(entry.value_ptr.*);
         }
         self.fn_signatures.deinit();
@@ -446,8 +437,8 @@ pub fn allocFnSig(
     params: []const ast.FnParam,
     return_type: ?*ast.TypeExpr,
     type_params: []const []const u8,
-) !*FunctionState.FnSig {
-    const sig = try self.alloc.create(FunctionState.FnSig);
+) !*types.FunctionSignature {
+    const sig = try self.alloc.create(types.FunctionSignature);
     errdefer self.alloc.destroy(sig);
 
     var param_names = try std.ArrayList([]const u8).initCapacity(self.alloc, params.len);
@@ -472,7 +463,7 @@ pub fn allocFnSig(
 
     sig.* = .{
         .param_names = try param_names.toOwnedSlice(self.alloc),
-        .param_types = try param_types.toOwnedSlice(self.alloc),
+        .params = try param_types.toOwnedSlice(self.alloc),
         .required_count = required_count,
         .type_params = type_params,
         .return_type = if (return_type) |rt|
@@ -494,7 +485,7 @@ pub fn declareFnSignature(
     const state = currentFunctionState(self) orelse return;
     if (ast.isDiscardName(name)) return;
     if (state.fn_signatures.get(name)) |old| {
-        self.alloc.free(old.param_types);
+        self.alloc.free(old.params);
         self.alloc.free(old.param_names);
         if (old.default_values.len > 0) self.alloc.free(old.default_values);
         self.alloc.destroy(old);
@@ -502,13 +493,13 @@ pub fn declareFnSignature(
     }
     const sig = try allocFnSig(self, params, return_type, type_params);
     errdefer {
-        self.alloc.free(sig.param_types);
+        self.alloc.free(sig.params);
         self.alloc.destroy(sig);
     }
     try state.fn_signatures.put(name, sig);
 }
 
-pub fn findFnSignature(self: *const Compiler, name: []const u8) ?*FunctionState.FnSig {
+pub fn findFnSignature(self: *const Compiler, name: []const u8) ?*types.FunctionSignature {
     var i = self.functions.items.len;
     while (i > 0) {
         i -= 1;

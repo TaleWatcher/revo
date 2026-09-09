@@ -138,7 +138,7 @@ pub fn inferCallReturnType(
         const fn_name = callee.expr.ident;
         const sig = state_mod.findFnSignature(self, fn_name) orelse return .{ .tag = .any };
         if (sig.type_params.len > 0 and sig.return_type.tag != .any)
-            return genericSubstReturnType(self, sig.type_params, type_args, args, sig.param_types, sig.return_type);
+            return genericSubstReturnType(self, sig.type_params, type_args, args, sig.params, sig.return_type);
         return sig.return_type;
     }
 

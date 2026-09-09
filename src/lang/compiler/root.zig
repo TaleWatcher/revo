@@ -1141,7 +1141,7 @@ pub const Compiler = struct {
     fn tryReorderNamedParams(
         self: *Compiler,
         args: []const *Node,
-        sig: *const FunctionState.FnSig,
+        sig: *const types.FunctionSignature,
     ) ![]const *Node {
         var has_named = false;
         var had_error = false;
@@ -1263,17 +1263,17 @@ pub const Compiler = struct {
         const reordered_args = try tryReorderNamedParams(self, args, sig);
         var had_error = false;
 
-        if (reordered_args.len < sig.required_count or reordered_args.len > sig.param_types.len) {
+        if (reordered_args.len < sig.required_count or reordered_args.len > sig.params.len) {
             var extra_parts = try std.ArrayList(diagnostic.Part).initCapacity(self.alloc, 1);
             defer extra_parts.deinit(self.alloc);
-            if (reordered_args.len > sig.param_types.len) {
+            if (reordered_args.len > sig.params.len) {
                 try self.appendUnexpectedArgPart(
                     reordered_args,
-                    sig.param_types.len,
+                    sig.params.len,
                     &extra_parts,
                 );
             }
-            const msg = if (sig.required_count == sig.param_types.len)
+            const msg = if (sig.required_count == sig.params.len)
                 try std.fmt.allocPrint(
                     self.alloc,
                     "call to `{s}` wants {d} arg(s), got {d}",
@@ -1292,9 +1292,9 @@ pub const Compiler = struct {
             had_error = true;
         }
 
-        const min_args = @min(sig.param_types.len, reordered_args.len);
+        const min_args = @min(sig.params.len, reordered_args.len);
         for (0..min_args) |i| {
-            const expected_type = sig.param_types[i];
+            const expected_type = sig.params[i];
             if (expected_type.tag == .any) continue;
             const actual_type = type_check.inferExprType(
                 self,
@@ -1348,11 +1348,11 @@ pub const Compiler = struct {
             };
         }
         // insert missing optional/default args
-        if (reordered_args.len < sig.param_types.len) {
-            var full_args = try self.alloc.alloc(*Node, sig.param_types.len);
+        if (reordered_args.len < sig.params.len) {
+            var full_args = try self.alloc.alloc(*Node, sig.params.len);
             errdefer self.alloc.free(full_args);
             for (reordered_args, 0..) |arg, idx| full_args[idx] = arg;
-            for (reordered_args.len..sig.param_types.len) |idx| {
+            for (reordered_args.len..sig.params.len) |idx| {
                 if (sig.default_values[idx]) |def_node| {
                     full_args[idx] = def_node;
                 } else {
@@ -1364,8 +1364,8 @@ pub const Compiler = struct {
                 }
             }
             // type-check the inserted defaults
-            for (reordered_args.len..sig.param_types.len) |idx| {
-                const expected_type = sig.param_types[idx];
+            for (reordered_args.len..sig.params.len) |idx| {
+                const expected_type = sig.params[idx];
                 if (expected_type.tag == .any or expected_type.tag == .type_var) continue;
                 const actual_type = type_check.inferExprType(self, full_args[idx]);
                 type_check.checkType(expected_type, actual_type) catch |err| switch (err) {
@@ -1638,7 +1638,7 @@ pub const Compiler = struct {
         if (own_sig and self.functions.items.len >= 2) {
             const parent = &self.functions.items[self.functions.items.len - 2];
             if (parent.fn_signatures.get(name)) |old| {
-                self.alloc.free(old.param_types);
+                self.alloc.free(old.params);
                 self.alloc.free(old.param_names);
                 if (old.default_values.len > 0) self.alloc.free(old.default_values);
                 self.alloc.destroy(old);
@@ -1749,7 +1749,7 @@ pub const Compiler = struct {
         try self.emit(.closure, proto_id);
 
         if (!own_sig) {
-            self.alloc.free(sig.param_types);
+            self.alloc.free(sig.params);
             self.alloc.destroy(sig);
         }
 
