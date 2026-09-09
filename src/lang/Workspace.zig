@@ -2667,7 +2667,7 @@ pub fn completions(
     var items = try std.ArrayList(Completion).initCapacity(arena, 128);
 
     if (dot_target) |target| {
-        try addFieldCompletions(self, vm, arena, &items, target, prefix, file_id);
+        try addFieldCompletions(self, vm, arena, &items, target, prefix, file_id, text, start - 1);
     } else {
         try addGeneralCompletions(self, vm, arena, &items, prefix, file_id);
     }
@@ -2675,7 +2675,69 @@ pub fn completions(
     return items.items;
 }
 
-/// completions for fields of a table or struct (after a dot)
+/// document-local table fields for dot-completion; true when anything
+/// was added (caller skips the untyped import-symbols path then)
+fn localFieldCompletions(
+    self: *Workspace,
+    arena: std.mem.Allocator,
+    items: *std.ArrayList(Completion),
+    file_id: FileId,
+    text: []const u8,
+    dot_pos: usize,
+    target: []const u8,
+    prefix: []const u8,
+) bool {
+    const t = self.completionTargetType(arena, file_id, text, dot_pos, target) orelse return false;
+    if (t.tag != .table) return false;
+    const fields = t.tag.table.fields orelse return false;
+    var added = false;
+    for (fields) |f| {
+        if (!std.mem.startsWith(u8, f.name, prefix)) continue;
+        const detail = f.field_type.formatType(arena) catch return added;
+        items.append(arena, .{
+            .label = f.name,
+            .kind = .field,
+            .detail = detail,
+        }) catch return added;
+        added = true;
+    }
+    return added;
+}
+
+/// type of a document local, analyzed from the buffer truncated before
+/// the incomplete access (which never parses). dep members resolve to
+/// any here; the import-symbols path covers those
+fn completionTargetType(
+    self: *Workspace,
+    arena: std.mem.Allocator,
+    file_id: FileId,
+    text: []const u8,
+    dot_pos: usize,
+    target: []const u8,
+) ?lang.types.TypeInfo {
+    const snap = self.snapshot(file_id) orelse return null;
+    const truncated = text[0..@min(dot_pos, text.len)];
+    const parsed = lang.parse(arena, .{ .name = snap.name, .text = truncated }, .{}) catch return null;
+    const root = switch (parsed) {
+        .ok => |ok| ok.root,
+        .err => return null,
+    };
+    const known_globals = getKnownGlobals(self, arena) catch return null;
+    var type_map = std.StringHashMap(lang.types.TypeInfo).init(arena);
+    var anchor: u8 = 0;
+    _ = semantic.analyze(arena, root, snap.name, truncated, known_globals, &type_map, null, null, .{
+        .ptr = @ptrCast(&anchor),
+        .resolveFn = nullResolve,
+    }) catch return null;
+    return type_map.get(target);
+}
+
+fn nullResolve(_: *anyopaque, _: []const u8, _: std.mem.Allocator) ?[]const u8 {
+    return null;
+}
+
+/// completions for fields of a table (after a dot); struct fields and
+/// nested receivers stay silent for now
 fn addFieldCompletions(
     self: *Workspace,
     vm: *VM,
@@ -2684,6 +2746,8 @@ fn addFieldCompletions(
     target: []const u8,
     prefix: []const u8,
     file_id: FileId,
+    text: []const u8,
+    dot_pos: usize,
 ) !void {
     const target_atom = vm.internAtom(target) catch return;
     // stdlib modules registered as globals (string, table, math, etc.)
@@ -2710,6 +2774,10 @@ fn addFieldCompletions(
             return;
         }
     }
+    // document locals with known table shapes; shadowing a stdlib
+    // name with a table still completes stdlib members above (runtime
+    // dispatches on type, not name)
+    if (self.localFieldCompletions(arena, items, file_id, text, dot_pos, target, prefix)) return;
     // user-imported modules (e.g. `import "one.rv"` creates a local binding)
     const imported_syms = self.importedModuleSymbols(arena, file_id, target) catch return;
     for (imported_syms) |sym| {

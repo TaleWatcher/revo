@@ -1058,6 +1058,33 @@ async def test_import_completion(client: LanguageClient):
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_local_table_completion(client: LanguageClient):
+    """completion after `t.` should show record fields of the local"""
+    uri = "file:///test/local_fields.rv"
+    client.text_document_did_open(
+        params=DidOpenTextDocumentParams(
+            text_document=TextDocumentItem(
+                uri=uri, language_id="revo", version=1,
+                text='let t = { name = "me", age = 30 }\nt.',
+            )
+        )
+    )
+    await client.wait_for_notification("textDocument/publishDiagnostics")
+    result = await client.text_document_completion_async(
+        params=CompletionParams(
+            position=Position(line=1, character=2),
+            text_document=TextDocumentIdentifier(uri=uri),
+        )
+    )
+    assert result is not None, "expected completions, got None"
+    items = result.items if hasattr(result, 'items') else result
+    labels = [i.label for i in items]
+    print("  local completion labels:", labels)
+    assert "name" in labels, f"expected 'name' completion, got: {labels}"
+    assert "age" in labels, f"expected 'age' completion, got: {labels}"
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_import_hover_module_name(client: LanguageClient):
     """hover over `one` (the module name) should show module info with exports"""
     with tempfile.TemporaryDirectory() as tmpdir:
