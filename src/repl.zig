@@ -318,6 +318,7 @@ pub const Session = struct {
                 .struct_type => "type",
                 .type_alias => "alias",
                 .param => "param",
+                .macro => "macro",
             };
             try out.print("{s} {s} : {d}\n", .{ kind, s.name, s.range.start.line });
         }

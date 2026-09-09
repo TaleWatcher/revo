@@ -917,7 +917,8 @@ async def test_inlay_hints(client: LanguageClient):
     found_x = [h for h in result if h.position.line == 0]
     assert len(found_x) >= 1, f"expected hint for x, got hints: {result}"
     hint = found_x[0]
-    assert "number" in hint.label, f"expected canonical type in label, got {hint.label}"
+    assert "number" in hint.label, f"expected canonical type in label, got {
+        hint.label}"
     assert hint.kind == 1  # InlayHintKind.Type = 1
 
 
@@ -1055,6 +1056,111 @@ async def test_import_completion(client: LanguageClient):
         labels = [i.label for i in items]
         assert "hi" in labels, f"expected 'hi' completion from import, got: {
             labels}"
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_bare_import_completion_after_dot(client: LanguageClient):
+    """typing `.` after a bare-imported module keeps completing its members
+    (deps recorded while valid must survive the unparseable keystroke)"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "a.rv"), "w") as f:
+            f.write('pub fn f() 10\npub let v = 5\n')
+
+        user_path = os.path.join(tmpdir, "b.rv")
+        user_uri = "file://" + user_path
+        client.text_document_did_open(params=DidOpenTextDocumentParams(
+            text_document=TextDocumentItem(
+                uri=user_uri, language_id="revo", version=1,
+                text='import "a"\na'),
+        ))
+
+        await client.wait_for_notification("textDocument/publishDiagnostics")
+        client.text_document_did_change(params=DidChangeTextDocumentParams(
+            text_document=VersionedTextDocumentIdentifier(
+                uri=user_uri, version=2),
+            content_changes=[TextDocumentContentChangeWholeDocument(
+                text='import "a"\na.')],
+        ))
+
+        await client.wait_for_notification("textDocument/publishDiagnostics")
+        result = await client.text_document_completion_async(
+            params=CompletionParams(
+                position=Position(line=1, character=2),
+                text_document=TextDocumentIdentifier(uri=user_uri),
+            )
+        )
+
+        assert result is not None, "expected completions, got None"
+        items = result.items if hasattr(result, 'items') else result
+        labels = [i.label for i in items]
+        assert "f" in labels, f"expected 'f' completion, got: {labels}"
+        assert "v" in labels, f"expected 'v' completion, got: {labels}"
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_module_hover_shows_macros_not_prelude(client: LanguageClient):
+    """module hover lists dep macros once, without prelude leakage"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with open(os.path.join(tmpdir, "a.rv"), "w") as f:
+            f.write(
+                'pub let v = 5\n\npub fn f() 10\n\npub proc hi!(m) do\n\tm.items\nend\n')
+        user_path = os.path.join(tmpdir, "b.rv")
+        user_text = 'import "a"\na.hi!(:ok)\n'
+        with open(user_path, "w") as f:
+            f.write(user_text)
+        dep_uri = "file://" + os.path.join(tmpdir, "a.rv")
+        client.text_document_did_open(params=DidOpenTextDocumentParams(
+            text_document=TextDocumentItem(
+                uri=dep_uri, language_id="revo", version=1,
+                text='pub let v = 5\n\npub fn f() 10\n\npub proc hi!(m) do\n\tm.items\nend\n'),
+        ))
+        await client.wait_for_notification("textDocument/publishDiagnostics")
+        user_uri = "file://" + user_path
+        client.text_document_did_open(params=DidOpenTextDocumentParams(
+            text_document=TextDocumentItem(
+                uri=user_uri, language_id="revo", version=1, text=user_text),
+        ))
+        await client.wait_for_notification("textDocument/publishDiagnostics")
+        result = await client.text_document_hover_async(
+            params=HoverParams(
+                position=Position(line=1, character=0),
+                text_document=TextDocumentIdentifier(uri=user_uri),
+            )
+        )
+        assert result is not None, "hover on module name returned None"
+        value = result.contents.value
+        print("  module hover:", repr(value))
+        assert "hi!" in value, f"expected macro in hover, got: {value}"
+        assert "ok?!" not in value, f"prelude leaked into hover: {value}"
+        assert value.count(
+            "proc hi!(m) do") == 1, f"expected no duplicates, got: {value}"
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_record_hover_shows_values(client: LanguageClient):
+    """hover over a table shows field types with literal values"""
+    uri = "file:///test/record_hover.rv"
+    client.text_document_did_open(
+        params=DidOpenTextDocumentParams(
+            text_document=TextDocumentItem(
+                uri=uri, language_id="revo", version=1,
+                text='let t = {\n\tname = "me"\n}\nt\n',
+            )
+        )
+    )
+    await client.wait_for_notification("textDocument/publishDiagnostics")
+    result = await client.text_document_hover_async(
+        params=HoverParams(
+            position=Position(line=3, character=0),
+            text_document=TextDocumentIdentifier(uri=uri),
+        )
+    )
+    assert result is not None, "hover returned None"
+    value = result.contents.value
+    print("  record hover:", repr(value))
+    assert 't: {name: string = "me"}' in value, f"expected record with value, got: {
+        value}"
 
 
 @pytest.mark.asyncio(loop_scope="module")

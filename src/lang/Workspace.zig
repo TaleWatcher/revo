@@ -109,6 +109,7 @@ pub const SymbolKind = enum {
     param,
     struct_type,
     type_alias,
+    macro,
 };
 
 pub const Symbol = struct {
@@ -116,6 +117,15 @@ pub const Symbol = struct {
     kind: SymbolKind,
     range: Range,
     type_name: ?types.TypeInfo = null,
+    /// condensed literal values per field (`name` -> `"me"`)
+    /// for value-showing hover
+    /// no default so every constructor decides
+    field_values: ?[]FieldPreview,
+};
+
+pub const FieldPreview = struct {
+    name: []const u8,
+    preview: []const u8,
 };
 
 pub const Hover = struct {
@@ -444,7 +454,6 @@ pub fn analyzeDetailed(
     });
 
     if (parsed == .err) {
-        self.removeDeps(id);
         var report = try parsed.err.report.copy(alloc);
         report.source_name = try alloc.dupe(u8, snap.name);
         report.source = try alloc.dupe(u8, snap.text);
@@ -570,6 +579,7 @@ pub fn documentSymbols(
             .kind = sym.kind,
             .range = sym.range,
             .type_name = if (sym.type_name) |ti| try types.clone(ti, alloc) else null,
+            .field_values = if (sym.field_values) |fvs| try cloneFieldPreviews(alloc, fvs) else null,
         });
     }
     return out.toOwnedSlice(alloc);
@@ -663,12 +673,14 @@ pub fn hover(
 
     // look up type in the definition file (may differ from current file)
     var type_name: []const u8 = "";
+    var record_display: []const u8 = "";
     if (def.file_id == id) {
         for (analysis.symbols) |sym| {
             if (std.mem.eql(u8, sym.name, name) and
                 sym.range.start.line == def.range.start.line)
             {
                 type_name = if (sym.type_name) |ti| try ti.formatType(alloc) else "";
+                record_display = try renderRecordDisplay(alloc, sym);
                 break;
             }
         }
@@ -678,11 +690,13 @@ pub fn hover(
         for (def_analysis.symbols) |sym| {
             if (std.mem.eql(u8, sym.name, name)) {
                 type_name = if (sym.type_name) |ti| try ti.formatType(alloc) else "";
+                record_display = try renderRecordDisplay(alloc, sym);
                 break;
             }
         }
     }
     defer if (type_name.len > 0) alloc.free(type_name);
+    defer if (record_display.len > 0) alloc.free(record_display);
 
     // for import modules, show exported symbols with full signatures
     if (self.resolveDepId(alloc, id, name)) |dep_id| {
@@ -731,6 +745,7 @@ pub fn hover(
     const display = blk: {
         if (try self.fnSig(alloc, def.file_id, name) != null)
             break :blk try renderDefinition(alloc, name, type_name, self, def.file_id);
+        if (record_display.len > 0) break :blk try alloc.dupe(u8, record_display);
         if (self.snapshot(def.file_id)) |ss|
             break :blk try renderBindingLine(alloc, ss.text, def.range, type_name);
         break :blk try renderDefinition(alloc, name, type_name, self, def.file_id);
@@ -771,6 +786,58 @@ pub fn sourceLine(text: []const u8, line: u32) []const u8 {
 fn stripPub(line: []const u8) []const u8 {
     if (std.mem.startsWith(u8, line, "pub ")) return line[4..];
     return line;
+}
+
+/// `{name: string = "me", age: num}`
+///
+/// record fields with known literal values appended
+/// fields without previews render bare
+fn renderRecordWithValues(
+    alloc: std.mem.Allocator,
+    fields: []const types.RecordField,
+    previews: []const FieldPreview,
+) ![]const u8 {
+    var buf = std.Io.Writer.Allocating.init(alloc);
+    errdefer buf.deinit();
+    try buf.writer.writeByte('{');
+
+    for (fields, 0..) |f, i| {
+        if (i > 0) try buf.writer.writeAll(", ");
+        try buf.writer.writeAll(f.name);
+        try buf.writer.writeAll(": ");
+        const ft = try f.field_type.formatType(alloc);
+        defer alloc.free(ft);
+        try buf.writer.writeAll(ft);
+
+        for (previews) |p| {
+            if (std.mem.eql(u8, p.name, f.name)) {
+                try buf.writer.writeAll(" = ");
+                try buf.writer.writeAll(p.preview);
+                break;
+            }
+        }
+    }
+
+    try buf.writer.writeByte('}');
+    return buf.toOwnedSlice();
+}
+
+/// `t: {name: string = "me"}`
+///
+/// for record-typed bindings with known literal values
+/// "" when inapplicable (caller falls back)
+fn renderRecordDisplay(alloc: std.mem.Allocator, sym: Symbol) ![]const u8 {
+    const ti = sym.type_name orelse return "";
+    if (ti.tag != .table) return "";
+
+    const fields = ti.tag.table.fields orelse return "";
+    const previews = sym.field_values orelse return "";
+
+    if (previews.len == 0) return "";
+    const record = try renderRecordWithValues(alloc, fields, previews);
+    defer alloc.free(record);
+
+    return try std.fmt.allocPrint(alloc, "{s}: {s}", .{ sym.name, record });
 }
 
 /// a value binding's source line, pub-stripped, `(type = t)` appended if
@@ -953,11 +1020,15 @@ pub fn inspectDetailed(
     var arena = std.heap.ArenaAllocator.init(self.alloc);
     defer arena.deinit();
 
+    // analysis never merges prelude macros: their spans point into the
+    // defaults source, so they'd surface as bogus symbols/hovers with
+    // wrong lines (expansion and lowering keep merging; completions get
+    // a static prelude list instead)
     const parsed = try lang.parse(arena.allocator(), .{
         .name = snap.name,
         .text = snap.text,
     }, .{
-        .include_default_macros = opts.include_default_macros,
+        .include_default_macros = false,
     });
 
     if (parsed == .err) {
@@ -1327,7 +1398,6 @@ fn inspectParseError(
     opts: lang.BuildOptions,
     err: lang.ParseFailure,
 ) !Analysis {
-    self.removeDeps(id);
     var report = try err.report.copy(alloc);
     report.source_name = try alloc.dupe(u8, snap.name);
     report.source = try alloc.dupe(u8, snap.text);
@@ -1500,6 +1570,7 @@ fn symbolsFromDep(self: *Workspace, alloc: std.mem.Allocator, dep_id: FileId) ![
             .kind = s.kind,
             .range = s.range,
             .type_name = if (s.type_name) |ti| try types.clone(ti, alloc) else null,
+            .field_values = if (s.field_values) |fvs| try cloneFieldPreviews(alloc, fvs) else null,
         });
     }
     return out.toOwnedSlice(alloc);
@@ -1544,9 +1615,22 @@ const FindImportVisitor = struct {
                 }
             }
         }
+        // bare `import "path"`: auto-bound name is the path stem
+        if (node.expr == .import_stmt) {
+            const stmt = node.expr.import_stmt;
+            if (std.mem.eql(u8, autoImportName(stmt.path), self.target)) {
+                self.result = stmt.path;
+            }
+        }
         lang.ast.walkAST(FindImportVisitor, self, node);
     }
 };
+
+/// auto-bound name for a bare `import "path"`, mirroring Parser
+fn autoImportName(path: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, path, ".d.rv")) return path[0 .. path.len - ".d.rv".len];
+    return std.fs.path.stem(path);
+}
 
 fn resolveDepId(
     self: *Workspace,
@@ -2152,14 +2236,33 @@ fn copySymbols(alloc: std.mem.Allocator, symbols: []const Symbol) ![]Symbol {
         if (s.type_name) |ti| {
             s.type_name = try types.clone(ti, alloc);
         }
+        if (s.field_values) |fvs| {
+            s.field_values = try cloneFieldPreviews(alloc, fvs);
+        }
     }
     return dupes;
+}
+
+fn cloneFieldPreviews(alloc: std.mem.Allocator, fvs: []const FieldPreview) ![]FieldPreview {
+    const owned = try alloc.alloc(FieldPreview, fvs.len);
+    for (fvs, owned) |fv, *dst| dst.* = .{
+        .name = try alloc.dupe(u8, fv.name),
+        .preview = try alloc.dupe(u8, fv.preview),
+    };
+    return owned;
 }
 
 fn freeSymbols(alloc: std.mem.Allocator, symbols: []Symbol) void {
     for (symbols) |*sym| {
         alloc.free(sym.name);
         if (sym.type_name) |*ti| types.deinitType(ti, alloc);
+        if (sym.field_values) |fvs| {
+            for (fvs) |fv| {
+                alloc.free(fv.name);
+                alloc.free(fv.preview);
+            }
+            alloc.free(fvs);
+        }
     }
     alloc.free(symbols);
 }
@@ -2342,6 +2445,10 @@ const SymbolVisitor = struct {
             .fn_expr => |f| for (f.params) |p| self.addName(p.name, .param, p.name_span),
             .struct_def => |def| self.addName(def.name, .struct_type, def.name_span),
             .type_alias => |t| self.addName(t.name, .type_alias, t.name_span),
+            // proc and template macros share the kind; node span lands
+            // on the decl start (neither carries a name span)
+            .proc_macro => |pm| self.addName(pm.name, .macro, node.span),
+            .macro_expr => |m| self.addName(m.name, .macro, node.span),
             .import_stmt => |is| {
                 if (self.import_named) {
                     self.import_named = false;
@@ -2358,7 +2465,17 @@ const SymbolVisitor = struct {
     fn addBinding(self: *@This(), b: lang.ast.Binding) void {
         self.import_named = b.value.expr == .import_stmt;
         switch (b.target.expr) {
-            .ident => |name| self.addName(name, .binding, b.target.span),
+            .ident => |name| {
+                const before = self.out.items.len;
+                self.addName(name, .binding, b.target.span);
+                // table literals carry hover previews on the just-added
+                // symbol (append-only, so a failed addName leaves len alone)
+                if (b.value.expr == .table and self.out.items.len > before) {
+                    if (self.tableFieldPreviews(b.value.expr.table)) |previews| {
+                        self.out.items[self.out.items.len - 1].field_values = previews;
+                    }
+                }
+            },
             .tuple_pattern => |items| {
                 for (items) |item| {
                     if (item.expr == .ident and !lang.ast.isDiscardName(item.expr.ident))
@@ -2367,6 +2484,25 @@ const SymbolVisitor = struct {
             },
             else => {},
         }
+    }
+
+    /// condensed `{k = v}` source slices for single-line literal fields;
+    /// null when nothing previewable
+    fn tableFieldPreviews(self: *@This(), entries: []const lang.ast.TableEntry) ?[]FieldPreview {
+        var out = std.ArrayList(FieldPreview).initCapacity(self.alloc, entries.len) catch return null;
+        for (entries) |entry| {
+            const name = lang.ast.staticFieldName(entry) orelse continue;
+            const span = entry.value.span;
+            if (span.end > self.text.len or span.start > span.end) continue;
+            const slice = self.text[span.start..span.end];
+            if (slice.len == 0 or std.mem.indexOfScalar(u8, slice, '\n') != null) continue;
+            out.append(self.alloc, .{
+                .name = self.alloc.dupe(u8, name) catch return null,
+                .preview = self.alloc.dupe(u8, slice) catch return null,
+            }) catch return null;
+        }
+        if (out.items.len == 0) return null;
+        return out.toOwnedSlice(self.alloc) catch null;
     }
 
     /// module name = right after the path's opening quote; fall back to the
@@ -2401,6 +2537,7 @@ const SymbolVisitor = struct {
                 .start = .{ .line = span.line, .character = @intCast(span.column) },
                 .end = .{ .line = span.line, .character = @intCast(span.column + name.len) },
             },
+            .field_values = null,
         }) catch {};
     }
 };
@@ -2806,6 +2943,14 @@ fn addGeneralCompletions(
         }
     }
 
+    // prelude macros (mirrors default_macro_source; analysis parses
+    // without them so they need explicit completion entries)
+    for ([_][]const u8{ "ok?!", "err?!", "some?!", "none?!", "print!" }) |name| {
+        if (std.mem.startsWith(u8, name, prefix)) {
+            items.append(arena, .{ .label = name, .kind = .function }) catch return;
+        }
+    }
+
     // globals from vm (stdlib + user)
     {
         var git = vm.globals.iterator();
@@ -2863,7 +3008,7 @@ fn addGeneralCompletions(
         for (analysis.symbols) |sym| {
             if (!std.mem.startsWith(u8, sym.name, prefix)) continue;
             const kind: CompletionKind = switch (sym.kind) {
-                .function => .function,
+                .function, .macro => .function,
                 .struct_type => .struct_type,
                 .type_alias => .class,
                 .binding, .param => .variable,
@@ -3080,6 +3225,33 @@ test "workspace query surface" {
     defer if (hov) |*h| h.deinit(alloc);
     try std.testing.expect(std.mem.find(u8, hov.?.text, "number") != null);
     try std.testing.expect(std.mem.find(u8, hov.?.text, "```revo") != null);
+}
+
+test "workspace hover shows record field values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var ws = try Workspace.init(alloc);
+    defer ws.deinit();
+
+    const source =
+        \\let t = {
+        \\  name = "me",
+        \\}
+        \\t
+    ;
+    const id = try ws.open("<test>", source, .{});
+    const query_opts: lang.BuildOptions = .{
+        .include_default_macros = false,
+        .install_debug_info = false,
+        .test_mode = false,
+    };
+
+    var hov = try ws.hover(alloc, id, .{ .line = 4, .character = 1 }, query_opts);
+    try std.testing.expect(hov != null);
+    defer if (hov) |*h| h.deinit(alloc);
+    try std.testing.expect(std.mem.find(u8, hov.?.text, "{name: string = \"me\"}") != null);
 }
 
 test "workspace hover over lib import manifest" {

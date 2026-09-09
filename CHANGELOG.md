@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - structural table types: annotate tables by shape with `{ name: string, age: num }`
-  - works in `let`/`const` bindings, fn params, return types, and type aliases
+  - structs deprecated in favour of this, should be removed by 0.1.3
   - open subtyping: extra fields are ok, missing or mistyped fields are compile errors
   - field access on a structurally typed table infers the field's type
 
@@ -18,13 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fn greet(u: { name: string }) u.name
   greet({ name = "bob", age = 40 }) # "bob"
   ```
+  - and the related lsp feats...
+    - unknown-field diagnostics: reading `t.a` where every field of `t` is known
+      and lacks `a` is now a compile error
 
-- unknown-field diagnostics: reading `t.a` where every field of `t` is known
-  and lacks `a` is now a compile error
-  tables with unknown shapes are still ok though
+      tables with unknown shapes are still ok though
 
-- lsp dot-completion for locals: `t.` completes record fields with types
-  (analyzed from the buffer minus the incomplete access, which never parses)
+    - lsp dot-completion for locals: `t.` completes record fields with types
+      (analyzed from the buffer minus the incomplete access, which never parses)
+
+    - lsp hover shows record field values: `t: {name: string = "me"}`
+      for table literals instead of just the shape
+
+    - lsp module hover lists macros: `pub proc`/`macro` decls show up
+      in `a.` hover and completions; prelude macros no longer leak
+      into dependency members with bogus lines
 
 - std:
   - `fs`:
