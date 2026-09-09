@@ -634,6 +634,27 @@ async def test_undefined_name_single_diag(client: LanguageClient):
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_unknown_field_diag(client: LanguageClient):
+    """unknown field on a known-shape table gives u a diagnostic"""
+    uri = "file:///test/unknown_field.rv"
+    client.text_document_did_open(
+        params=DidOpenTextDocumentParams(
+            text_document=TextDocumentItem(
+                uri=uri, language_id="revo", version=1,
+                text='let t = { name = "me" }\nt.a\n',
+            )
+        )
+    )
+    await client.wait_for_notification("textDocument/publishDiagnostics")
+    diags = client.diagnostics.get(uri, [])
+    for d in diags:
+        print(f"  diag: msg={d.message!r} code={d.code} range={d.range}")
+    assert len(diags) == 1, f"expected 1 diagnostic for unknown field, got {
+        len(diags)}: {[d.message for d in diags]}"
+    assert "a" in diags[0].message, "message should reference the field"
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_undefined_name_no_duplicates(client: LanguageClient):
     """same error from semantic+compile passes should not produce duplicates"""
     uri = "file:///test/undef_dup.rv"

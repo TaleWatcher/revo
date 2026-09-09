@@ -131,6 +131,10 @@ const SemanticChecker = struct {
     type_annotations: ?*std.AutoHashMap(*const ast.Node, types_mod.TypeInfo),
     typed_names: std.StringHashMap(void),
     table_field_map: std.StringHashMap(std.StringHashMap(types_mod.TypeInfo)),
+    /// idents assigned inside fn bodies
+    /// the closure may run anywhere, so their table shapes are no longer fully known
+    /// (never cleared; may miss flags, never false-flags)
+    escaped: std.StringHashMap(void),
     /// vm globals, module field resolution only applies to these so a
     /// local binding named `fs` shadows the stdlib module
     known_globals: std.StringHashMap(void),
@@ -171,6 +175,7 @@ const SemanticChecker = struct {
             .type_annotations = type_annotations,
             .typed_names = .init(alloc),
             .table_field_map = .init(alloc),
+            .escaped = .init(alloc),
             .known_globals = .init(alloc),
             .shadowed_globals = .init(alloc),
             .import_fn_sigs = .init(alloc),
@@ -416,6 +421,44 @@ const SemanticChecker = struct {
         eff[0] = callee.expr.field.object;
         for (args, 1..) |a, i| eff[i] = a;
         return eff;
+    }
+
+    /// an ident assigned inside a fn body could be mutated from anywhere
+    ///   once the closure escapes
+    ///
+    /// only marks names bound outside the current scope
+    ///   (locals assigned in their own scope r still precise)
+    fn markEscaped(self: *SemanticChecker, name: []const u8) !void {
+        if (self.fn_nesting == 0) return;
+        if (self.scopes.items.len == 0) return;
+        if (self.scopes.items[self.scopes.items.len - 1].values.contains(name)) return;
+        try self.escaped.put(name, {});
+    }
+
+    /// unknown member access on a fully-known table shape
+    /// so `t.a` where every field of t is known but lacks `a`
+    /// ~ open tables with unknown shapes (fields == null) never flag
+    /// ~ assigned and imported fields count via table_field_map
+    /// ~ escaped tables (mutated through closures) never flag
+    fn checkKnownField(self: *SemanticChecker, object: *const ast.Node, name: []const u8, span: ast.Span) !void {
+        const object_type = types_mod.inferExprType(self, object);
+        switch (object_type.tag) {
+            .table => |tbl| {
+                if (object.expr == .ident and self.escaped.contains(object.expr.ident)) return;
+                if (tbl.fields) |fs| {
+                    if (types_mod.findField(fs, name) != null) return;
+                    if (object.expr == .ident) {
+                        if (self.table_field_map.get(object.expr.ident)) |fields| {
+                            if (fields.get(name) != null) return;
+                        }
+                    }
+                    const obj_str = try object_type.formatType(self.alloc);
+                    const msg = try std.fmt.allocPrint(self.alloc, "field `{s}` is not defined on {s}", .{ name, obj_str });
+                    try self.appendError(msg, span, "unknown field");
+                }
+            },
+            else => {},
+        }
     }
 
     pub fn inferFieldType(self: *SemanticChecker, object: *const ast.Node, name: []const u8) types_mod.TypeInfo {
@@ -700,11 +743,19 @@ const SemanticChecker = struct {
             },
             .field => |f| blk: {
                 _ = try self.analyzeNode(f.object);
+                try self.checkKnownField(f.object, f.name, node.span);
                 break :blk types_mod.inferExprType(self, node);
             },
             .index => |idx| blk: {
                 _ = try self.analyzeNode(idx.object);
                 _ = try self.analyzeNode(idx.key);
+                // `t[:a]` / `t["a"]` with a static key check like `t.a`
+                const static_key: ?[]const u8 = switch (idx.key.expr) {
+                    .hash => |name| ast.atomName(name),
+                    .string => |s| s,
+                    else => null,
+                };
+                if (static_key) |key| try self.checkKnownField(idx.object, key, node.span);
                 break :blk types_mod.inferExprType(self, node);
             },
             .range_literal => |v| blk: {
@@ -1185,6 +1236,7 @@ const SemanticChecker = struct {
                     if (self.table_field_map.getPtr(field.object.expr.ident)) |fields| {
                         try fields.put(field.name, value_type);
                     }
+                    try self.markEscaped(field.object.expr.ident);
                 }
                 if (object_type.tag == .struct_type) {
                     const layout = self.struct_layouts.get(object_type.tag.struct_type) orelse return .{ .tag = .any };
@@ -1198,13 +1250,42 @@ const SemanticChecker = struct {
                 }
             },
             .index => |idx| {
-                if (idx.key.expr == .hash and idx.object.expr == .ident) {
-                    if (self.table_field_map.getPtr(idx.object.expr.ident)) |fields| {
-                        try fields.put(idx.key.expr.hash, value_type);
+                // static keys join the known fields so later reads see
+                // them; numbers stay untracked (never field names)
+                if (idx.object.expr == .ident) {
+                    const key_name: ?[]const u8 = switch (idx.key.expr) {
+                        .hash => |name| ast.atomName(name),
+                        .string => |s| s,
+                        else => null,
+                    };
+                    if (key_name) |key| {
+                        if (self.table_field_map.getPtr(idx.object.expr.ident)) |fields| {
+                            try fields.put(key, value_type);
+                        }
                     }
                 }
 
                 const actual_type = try self.analyzeNode(idx.object);
+                // dynamic keys hide unknown content: an ident table with a
+                // fully known shape forgets its fields so later reads stay
+                // sound; annotated bindings keep their contract.
+                // mark first: redeclaring below shadows the name into the
+                // current scope, which would defeat the outer-scope check
+                if (idx.object.expr == .ident and actual_type.tag == .table and
+                    !self.typed_names.contains(idx.object.expr.ident))
+                {
+                    try self.markEscaped(idx.object.expr.ident);
+                    const static = switch (idx.key.expr) {
+                        .hash, .string => true,
+                        else => false,
+                    };
+                    if (!static and actual_type.tag.table.fields != null) {
+                        var generic = actual_type;
+                        generic.tag.table.fields = null;
+                        const prev_doc = if (self.lookupEntry(idx.object.expr.ident)) |e| e.doc else null;
+                        try self.declare(idx.object.expr.ident, generic, prev_doc);
+                    }
+                }
                 if (actual_type.tag == .struct_type) {
                     const name_str = actual_type.tag.struct_type;
                     try self.appendError(

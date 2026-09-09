@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   greet({ name = "bob", age = 40 }) # "bob"
   ```
 
+- unknown-field diagnostics: reading `t.a` where every field of `t` is known
+  and lacks `a` is now a compile error
+  tables with unknown shapes are still ok though
+
 - std:
   - `fs`:
     - `fs.open(path, mode?)`: mode is `"r"` (default, opens existing), `"w"`

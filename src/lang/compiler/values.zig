@@ -341,6 +341,15 @@ fn compileAssignSimple(
                 try moveInstTo(self, key_dst, key_inst);
                 try moveInstTo(self, obj_dst, obj_inst);
                 try self.emit(.table_get, 0);
+
+                // static string keys widen like hash keys
+                // computed keys leave the hint alone
+                //
+                // nulling it would misguide later method-shadowing codegen,
+                // and the missed precision fails w compile error rather than it being wrong
+                if (index.key.expr == .string) {
+                    try widenLocalTableHint(self, index.object, index.key.expr.string, value);
+                }
             }
         },
         else => {

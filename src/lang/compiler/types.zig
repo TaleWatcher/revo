@@ -699,6 +699,7 @@ fn inferTableType(ctx: anytype, entries: []const ast.TableEntry) TypeInfo {
     var key_type: TypeInfo = .{ .tag = .any };
     var saw_explicit_key = false;
     var saw_implicit_key = false;
+    var saw_dynamic = false;
     var fields = std.ArrayList(RecordField).initCapacity(ctx.alloc, entries.len) catch return .{ .tag = .any };
 
     for (entries) |entry| {
@@ -721,6 +722,10 @@ fn inferTableType(ctx: anytype, entries: []const ast.TableEntry) TypeInfo {
                 if (findFieldIndex(fields.items, name)) |i| {
                     fields.items[i].field_type = field_type;
                 } else fields.append(ctx.alloc, .{ .name = name, .field_type = field_type }) catch return .{ .tag = .any };
+            } else {
+                // computed or non-ident keys hide dynamic content
+                // so a missing field cant prove absence
+                saw_dynamic = true;
             }
         } else {
             saw_implicit_key = true;
@@ -732,8 +737,9 @@ fn inferTableType(ctx: anytype, entries: []const ast.TableEntry) TypeInfo {
 
     // a literal's shape is fully known, even when empty: `{}` carries
     // zero fields so record targets reject it; genuinely unknown shapes
-    // (plain `table`, `any`) keep fields null and stay optimistic
-    const known_fields: ?[]RecordField = fields.toOwnedSlice(ctx.alloc) catch return .{ .tag = .any };
+    // (plain `table`, `any`, dynamic keys) keep fields null and stay
+    // optimistic
+    const known_fields: ?[]RecordField = if (saw_dynamic) null else fields.toOwnedSlice(ctx.alloc) catch return .{ .tag = .any };
 
     if (!saw_explicit_key) {
         return makeTable(null, value_ptr, known_fields);
@@ -1125,6 +1131,52 @@ test "fn alias enforces arity at call sites" {
         \\ type F = fn(num, num) -> num
         \\ fn apply(f: F) f(1)
     , .ParseError);
+}
+
+test "unknown table field read is an error" {
+    try t.expectCompileError(
+        \\ let t = { name = "me" }
+        \\ t.a
+    , .ParseError);
+}
+
+test "unknown table field index read is an error" {
+    try t.expectCompileError(
+        \\ let t = { name = "me" }
+        \\ t[:a]
+    , .ParseError);
+    try t.expectCompileError(
+        \\ let t = { name = "me" }
+        \\ t["a"]
+    , .ParseError);
+}
+
+test "assigned and dynamic fields are not flagged" {
+    // static assign extends the known shape
+    try t.topNumber(
+        \\ let t = {}
+        \\ t.a = 41
+        \\ t.a
+    , 41);
+    // dynamic keys make the shape unknown: optimistic, no error
+    try t.topNumber(
+        \\ const k = "a"
+        \\ const t = {}
+        \\ t[k] = 41
+        \\ t[k]
+    , 41);
+    // mutations through closures escape analysis: optimistic, no error
+    try t.topNumber(
+        \\ const out = {}
+        \\ const f = fn(k) out[k] = 1
+        \\ f("a")
+        \\ out["a"]
+    , 1);
+    // foreign tables have unknown shapes: optimistic, no error
+    try t.topNumber(
+        \\ fn f(t: table) t.a
+        \\ f({a = 41})
+    , 41);
 }
 
 test "typed function params accept correct types" {
