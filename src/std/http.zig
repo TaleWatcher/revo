@@ -51,6 +51,8 @@ pub const Impl = struct {
         };
         if (body) |b| {
             request.payload = b.slice;
+        } else if (method.requestHasBody()) {
+            request.payload = "";
         }
         var response_writer = std.Io.Writer.Allocating.init(vm.runtime.alloc);
         defer response_writer.deinit();
@@ -191,7 +193,7 @@ fn buildBody(method: Method, opts: Data, vm: *VM) !?Body {
         }
     }
 
-    return error.BodyRequired;
+    return null;
 }
 
 /// borrowed from vm string unless json
