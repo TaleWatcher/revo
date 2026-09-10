@@ -198,11 +198,6 @@ pub fn loadC(vm_ptr: *VM, lib_path: []const u8) ![]functions.CFunction {
         return error.OsNotSupported;
     }
 
-    if (builtin.target.os.tag == .windows) {
-        std.debug.print("error: dynamic library loading is not supported on windows\n", .{});
-        return error.OsNotSupported;
-    }
-
     var lib = try std.DynLib.open(lib_path);
 
     const bindings_ptr: [*]const RevoBinding = lib.lookup([*]const RevoBinding, "revo_bindings") orelse {
@@ -230,6 +225,31 @@ pub fn loadC(vm_ptr: *VM, lib_path: []const u8) ![]functions.CFunction {
     return try registered.toOwnedSlice(vm_ptr.runtime.alloc);
 }
 
+const WinDynLib = struct {
+    const windows = std.os.windows;
+    dll: windows.HMODULE,
+
+    pub fn open(path: []const u8) !WinDynLib {
+        // maybe windows.PATH_MAX_WIDE here
+        var buf: [1024:0]u16 = undefined;
+        const path_w = try std.unicode.utf8ToUtf16LeArrayPtr(&buf, path);
+        const handle = try windows.LoadLibraryW(path_w);
+        return .{ .dll = handle };
+    }
+
+    pub fn lookup(self: *WinDynLib, comptime T: type, name: [:0]const u8) ?T {
+        const addr = windows.kernel32.GetProcAddress(self.dll, name.ptr) orelse return null;
+        return @as(T, @ptrCast(@alignCast(addr)));
+    }
+
+    pub fn close(self: *WinDynLib) void {
+        windows.FreeLibrary(self.dll);
+        self.* = undefined;
+    }
+};
+
+const DynLib = if (builtin.target.os.tag == .windows) WinDynLib else std.DynLib;
+
 ///
 /// load a shared lib's `revo_native_bindings` as host functions
 ///
@@ -237,9 +257,6 @@ pub fn loadC(vm_ptr: *VM, lib_path: []const u8) ![]functions.CFunction {
 /// so the vm does arity n type checking on call
 pub fn loadNative(vm_ptr: *VM, lib_path: []const u8) ![]HostFunc {
     if (builtin.target.os.tag == .wasi or builtin.target.os.tag == .freestanding) {
-        return error.OsNotSupported;
-    }
-    if (builtin.target.os.tag == .windows) {
         return error.OsNotSupported;
     }
 
@@ -256,10 +273,13 @@ pub fn loadNative(vm_ptr: *VM, lib_path: []const u8) ![]HostFunc {
     while (i < 4096) : (i += 1) {
         const b = bindings_ptr[i];
         const name_ptr: ?[*:0]const u8 = @ptrCast(b.name);
+
         if (name_ptr == null) break;
         const fn_ptr: ?*const anyopaque = @ptrCast(b.fn_ptr);
+
         if (fn_ptr == null) return error.InvalidBinding;
         const name = std.mem.span(name_ptr.?);
+
         try registered.append(vm_ptr.runtime.alloc, .{
             .name = name,
             .arity = b.arity,
