@@ -715,6 +715,7 @@ fn inferTableType(ctx: anytype, entries: []const ast.TableEntry) TypeInfo {
     var saw_implicit_key = false;
     var saw_dynamic = false;
     var fields = std.ArrayList(RecordField).initCapacity(ctx.alloc, entries.len) catch return .{ .tag = .any };
+    var array_index: u32 = 0;
 
     for (entries) |entry| {
         // method defs are record fields with their fn type
@@ -748,6 +749,10 @@ fn inferTableType(ctx: anytype, entries: []const ast.TableEntry) TypeInfo {
                 saw_dynamic = true;
             }
         } else {
+            // keyless/implicit entries are numeric fields
+            const idx_name = std.fmt.allocPrint(ctx.alloc, "{d}", .{array_index}) catch return .{ .tag = .any };
+            array_index += 1;
+            fields.append(ctx.alloc, .{ .name = idx_name, .field_type = field_type }) catch return .{ .tag = .any };
             saw_implicit_key = true;
         }
     }
@@ -761,7 +766,7 @@ fn inferTableType(ctx: anytype, entries: []const ast.TableEntry) TypeInfo {
     // optimistic
     const known_fields: ?[]RecordField = if (saw_dynamic) null else fields.toOwnedSlice(ctx.alloc) catch return .{ .tag = .any };
 
-    if (!saw_explicit_key) {
+    if (!saw_explicit_key and !saw_implicit_key) {
         return makeTable(null, value_ptr, known_fields);
     }
 

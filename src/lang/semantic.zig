@@ -1060,6 +1060,7 @@ const SemanticChecker = struct {
         // table literal -- analyze entries and record field types for method shadowing
         if (binding.value.expr == .table) {
             var fields = std.StringHashMap(types_mod.TypeInfo).init(self.alloc);
+            var implicit_idx: u32 = 0;
             for (binding.value.expr.table) |entry| {
                 // `fn name(self) ...` - a method definition, keyless entry
                 if (entry.key == null and entry.value.expr == .decl and
@@ -1080,7 +1081,10 @@ const SemanticChecker = struct {
                         _ = try self.analyzeNode(entry.value);
                     }
                 } else {
-                    _ = try self.analyzeNode(entry.value);
+                    const ft = try self.analyzeNode(entry.value);
+                    const idx_name = try std.fmt.allocPrint(self.alloc, "{d}", .{implicit_idx});
+                    implicit_idx += 1;
+                    try fields.put(idx_name, ft);
                 }
             }
             try self.table_field_map.put(name, fields);

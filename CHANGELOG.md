@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - structs deprecated in favour of this, should be removed by 0.1.3
   - open subtyping: extra fields are ok, missing or mistyped fields are compile errors
   - field access on a structurally typed table infers the field's type
+  - tracks both array and hash entries
 
   ```ruby
   fn greet(u: { name: string }) u.name
